@@ -1,7 +1,16 @@
 from vnpy_ctastrategy.backtesting import BacktestingEngine, OptimizationSetting
 from vnpy_ctastrategy import CtaTemplate
 from datetime import datetime
+
+from data_prep.run import run_pipeline
 from strategies.double_ma import DoubleMaStrategy
+
+from vnpy.trader.setting import SETTINGS
+
+SETTINGS["database.name"] = "mongodb"
+SETTINGS["database.database"] = "vnpy"
+SETTINGS["database.host"] = "127.0.0.1"
+SETTINGS["database.port"] = 27017
 
 def main():
     engine = BacktestingEngine()
@@ -24,4 +33,5 @@ def main():
     engine.show_chart()
 
 if __name__ == "__main__":
-    main()
+    # main()
+    run_pipeline("600435.SH", "20200101", "20201231")
