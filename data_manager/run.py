@@ -1,4 +1,7 @@
 # dataprep/run.py
+# 获取指定数据，保存到对应数据库
+# 清洗数据，转换为vnpy格式，保存到vnpy数据库
+
 from .fetcher import fetch_data
 from .cleaner import clean_data
 from .converter import convert_to_vnpy_format
