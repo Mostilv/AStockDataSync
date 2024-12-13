@@ -1,5 +1,6 @@
-import time
+from data_manager.tushare import TushareManager
 
 # 获取今天的日期并格式化为 yyyymmdd
-today_date = time.strftime('%Y%m%d', time.localtime())
-print(today_date)
+manager = TushareManager()
+
+manager.fetch_stock_basic()

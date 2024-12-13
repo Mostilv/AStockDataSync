@@ -2,13 +2,11 @@
 import tushare as ts
 import pandas as pd
 import time
-
-from config import MONGODB_URI,TUSHARE_TOKEN,TUSHARE_DB,COLLECTION_DAILY
-
-import datetime
 import pandas as pd
 import tushare as ts
 from pymongo import MongoClient, ASCENDING
+
+from config import MONGODB_URI,TUSHARE_TOKEN,TUSHARE_DB,COLLECTION_DAILY
 
 class TushareManager:
     def __init__(self, 
@@ -40,7 +38,31 @@ class TushareManager:
             self.collection.create_index([("ts_code", ASCENDING), ("trade_date", ASCENDING)], unique=True)
 
     #获取股票列表
-    
+    def fetch_stock_basic(self):
+        
+        stock_list = self.pro.stock_basic(**{
+            "ts_code": "",
+            "name": "",
+            "exchange": "",
+            "market": "",
+            "is_hs": "",
+            "list_status": "",
+            "limit": "",
+            "offset": ""
+        }, fields=[
+            "ts_code",
+            "symbol",
+            "name",
+            "area",
+            "industry",
+            "cnspell",
+            "market",
+            "list_date",
+            "act_name",
+            "act_ent_type"
+        ])
+        print(stock_list)
+        return stock_list
     #获取日线数据
     def fetch_daily_data(self, 
                         ts_code: str, 
@@ -123,12 +145,21 @@ class TushareManager:
         end_date: 结束日期 "YYYYMMDD"
         """
         #获取股票列表
+        
         #循环获取数据，每1分5秒执行一次循环,每次调取500次,直到获取所有数据
         print("Data saved to MongoDB.")
 
 
 if __name__ == "__main__":
+    import sys
+    import os
+    # 获取当前脚本所在的父目录路径
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+
+    # 将父目录添加到系统路径
+    sys.path.insert(0, parent_dir)
     # 使用示例
     manager = TushareManager()
 
-    manager.run(ts_code="000001.SZ", start_date="20200101", end_date="20201231")
+    manager.fetch_stock_basic()
