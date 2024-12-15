@@ -1,19 +1,22 @@
-#tushare 相关的数据获取及对应mongo数据库管理
-import tushare as ts
-import pandas as pd
 import time
-import pandas as pd
-import tushare as ts
+from tqdm import tqdm
 from pymongo import MongoClient, ASCENDING
+import tushare as ts
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
-from config import MONGODB_URI,TUSHARE_TOKEN,TUSHARE_DB,COLLECTION_DAILY
+from config import MONGODB_URI, TUSHARE_TOKEN, TUSHARE_DB, COLLECTION_BASIC, COLLECTION_DAILY
 
 class TushareManager:
+    #TODO 1.记录每支股票最新数据的日期，用于获取数据时不重复获取
+    #     2.没有数据的股票最新日期为开始日期
     def __init__(self, 
                 tushare_token: str = TUSHARE_TOKEN, 
                 mongo_uri: str = MONGODB_URI, 
                 db_name: str = TUSHARE_DB,
-                collection_name: str = COLLECTION_DAILY):
+                collection_basic: str = COLLECTION_BASIC,
+                collection_daily: str = COLLECTION_DAILY):
         """
         初始化TushareManager对象。
         
@@ -21,25 +24,36 @@ class TushareManager:
         tushare_token: 你的Tushare接口token
         mongo_uri: MongoDB连接字符串
         db_name: 数据库名
-        collection_name: 集合名
+        collection_basic: 股票列表数据集合
+        collection_daily: 日线数据集合
         """
-        #tushare
+        # 初始化 Tushare
         self.token = tushare_token
         ts.set_token(tushare_token)
         self.pro = ts.pro_api()
-        #数据库
+
+        # 初始化 MongoDB
         self.client = MongoClient(mongo_uri)
         self.db = self.client[db_name]
-        self.collection = self.db[collection_name]
-        #索引
-        existing_indexes = self.collection.index_information()
-        if "ts_code_1_trade_date_1" not in existing_indexes:
-            # 为(symbol, trade_date)创建唯一索引，有助于加快查询和防止重复插入
-            self.collection.create_index([("ts_code", ASCENDING), ("trade_date", ASCENDING)], unique=True)
-
-    #获取股票列表
-    def fetch_stock_basic(self):
+        self.collection_basic = self.db[collection_basic]
+        self.collection_daily = self.db[collection_daily]
         
+        # 为basic和daily集合创建索引
+        existing_indexes_basic = self.collection_basic.index_information()
+        if "ts_code_1" not in existing_indexes_basic:
+            self.collection_basic.create_index([("ts_code", ASCENDING)], unique=True)
+        existing_indexes_daily = self.collection_daily.index_information()
+        if "ts_code_1_trade_date_1" not in existing_indexes_daily:
+            self.collection_daily.create_index([("ts_code", ASCENDING), ("trade_date", ASCENDING)], unique=True)
+
+        # 速率控制参数
+        self.max_requests = 500  # 65秒内最多500次请求
+        self.request_count = 0
+        self.start_time = time.time()
+        self.lock = threading.Lock()  # 用于保护 request_count 和速率控制
+
+    # 获取股票列表并存储在basic集合
+    def fetch_stock_basic(self):
         stock_list = self.pro.stock_basic(**{
             "ts_code": "",
             "name": "",
@@ -61,26 +75,23 @@ class TushareManager:
             "act_name",
             "act_ent_type"
         ])
-        print(stock_list)
-        return stock_list
-    #获取日线数据
+        records = stock_list.to_dict('records')
+        
+        for record in records:
+            self.collection_basic.replace_one(
+                {'ts_code': record['ts_code']}, 
+                record, 
+                upsert=True
+            )
+        print("func:'fetch_stock_basic' finished")
+        return
+
+    # 获取日线数据（单支股票）
     def fetch_daily_data(self, 
                         ts_code: str, 
                         start_date: str,
                         end_date: str,
                         max_retries:int = 3) -> pd.DataFrame:
-        """
-        从Tushare获取一只股票(ts_code)在指定日期范围的日线行情数据。
-        
-        参数：
-        ts_code: 股票代码（带交易所后缀，如"000001.SZ"）
-        start_date: 开始日期，格式"YYYYMMDD"
-        end_date: 结束日期，格式"YYYYMMDD"
-        max_retries: 请求失败时的最大重试次数
-        
-        返回：
-        pd.DataFrame, 包含日线数据
-        """
         for attempt in range(max_retries):
             try:
                 df = self.pro.daily(
@@ -103,63 +114,81 @@ class TushareManager:
                 if df is not None and not df.empty:
                     return df
                 else:
-                    print(f"No data returned for {ts_code} from {start_date} to {end_date}. Attempt {attempt+1}/{max_retries}.")
+                    print(f"No data for {ts_code} from {start_date} to {end_date}. Attempt {attempt+1}/{max_retries}.")
 
             except Exception as e:
-                print(f"Error fetching data: {e}. Attempt {attempt+1}/{max_retries}.")
+                print(f"Error fetching data for {ts_code}: {e}. Attempt {attempt+1}/{max_retries}.")
             time.sleep(2)  # 等待2秒再重试
         print(f"Failed to fetch data for {ts_code} after {max_retries} attempts.")
-        return pd.DataFrame()  # 返回空DataFrame
+        return pd.DataFrame()
 
-    #保存到数据库
-    def save_to_mongo(self, df: pd.DataFrame):
-        """
-        将DataFrame插入或更新至MongoDB中。
-        利用upsert方式在(symbol, trade_date)有冲突时更新数据。
-        
-        参数：
-        df: 需要保存的数据DataFrame
-        """
+    # 将获取的日线数据保存到MongoDB
+    def save_to_mongo(self, df: pd.DataFrame, ts_code: str):
         if df is None or df.empty:
-            print("No data to save.")
+            #print(f"{ts_code}: No data to save.")
             return
-
-        # 将每一行转换为dict并更新或插入MongoDB
         records = df.to_dict('records')
         for r in records:
             query = {"ts_code": r["ts_code"], "trade_date": r["trade_date"]}
-            self.collection.update_one(query, {"$set": r}, upsert=True)
+            self.collection_daily.update_one(query, {"$set": r}, upsert=True)
 
-    #获取所有股票的数据直到查询次数上限
-    def fetch_all_daily_data(self,
-                            start_date: str = 20150101,
-                            end_date: str = time.strftime('%Y%m%d', time.localtime())
-                            ):
+    def _fetch_and_save(self, ts_code: str, start_date: str, end_date: str):
         """
-        执行完整的数据获取、存储流程,获取2015年至今的所有股票数据
-        每分钟内最多调取500次,每次6000条数据
+        多线程调用的工作函数：
+        在这个函数中进行速率控制，获取日线数据，并保存至MongoDB。
+        """
+        # 速率控制
+        with self.lock:
+            # 如果已经达到500次请求，则需要计算时间窗是否小于65秒
+            if self.request_count >= self.max_requests:
+                elapsed_time = time.time() - self.start_time
+                if elapsed_time < 65:
+                    sleep_time = 65 - elapsed_time
+                    print(f"\nRate limit reached, sleeping for {sleep_time:.2f} seconds...")
+                    time.sleep(sleep_time)
+                # 重置计数器和时间
+                self.request_count = 0
+                self.start_time = time.time()
+
+            self.request_count += 1
+        
+        # 获取数据
+        df = self.fetch_daily_data(ts_code, start_date, end_date)
+        # 保存数据
+        self.save_to_mongo(df, ts_code)
+        return ts_code
+
+    # 使用多线程获取所有股票的数据
+    def fetch_all_daily_data(self,
+                            start_date: str = "20150101",
+                            end_date: str = time.strftime('%Y%m%d', time.localtime()),
+                            max_threads: int = 10):
+        """
+        执行完整的数据获取、存储流程，多线程版本。
+        tushare接口限制了每65秒内最多调取500次。
         
         参数：
-        ts_code: 股票代码，如"000001.SZ"
         start_date: 开始日期 "YYYYMMDD"
         end_date: 结束日期 "YYYYMMDD"
+        max_threads: 并行线程数量
         """
-        #获取股票列表
-        
-        #循环获取数据，每1分5秒执行一次循环,每次调取500次,直到获取所有数据
-        print("Data saved to MongoDB.")
+        # 从stock_basic集合中获取股票列表
+        ts_basic = self.collection_basic.find({}, {"ts_code": 1})
+        ts_code_list = [stock["ts_code"] for stock in ts_basic]
 
+        # 使用线程池
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-if __name__ == "__main__":
-    import sys
-    import os
-    # 获取当前脚本所在的父目录路径
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
+        with ThreadPoolExecutor(max_workers=max_threads) as executor, \
+                tqdm(total=len(ts_code_list), desc="Fetching daily data", unit="stock") as pbar:
+            futures = []
+            for ts_code in ts_code_list:
+                future = executor.submit(self._fetch_and_save, ts_code, start_date, end_date)
+                futures.append(future)
 
-    # 将父目录添加到系统路径
-    sys.path.insert(0, parent_dir)
-    # 使用示例
-    manager = TushareManager()
+            for f in as_completed(futures):
+                ts_code = f.result()
+                pbar.update(1)
+                pbar.set_postfix({"last_finished": ts_code})
 
-    manager.fetch_stock_basic()
+        print("func: 'fetch_all_daily_data' finished")
