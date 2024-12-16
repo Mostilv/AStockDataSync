@@ -6,39 +6,35 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-from config import MONGODB_URI, TUSHARE_TOKEN, TUSHARE_DB, COLLECTION_BASIC, COLLECTION_DAILY
+from utils.config_loader import load_config
 
 class TushareManager:
     #TODO 1.记录每支股票最新数据的日期，用于获取数据时不重复获取
     #     2.没有数据的股票最新日期为开始日期
-    def __init__(self, 
-                tushare_token: str = TUSHARE_TOKEN, 
-                mongo_uri: str = MONGODB_URI, 
-                db_name: str = TUSHARE_DB,
-                collection_basic: str = COLLECTION_BASIC,
-                collection_daily: str = COLLECTION_DAILY):
+    def __init__(self,config_path: str = 'config.yaml'):
         """
         初始化TushareManager对象。
         
         参数：
-        tushare_token: 你的Tushare接口token
-        mongo_uri: MongoDB连接字符串
-        db_name: 数据库名
-        collection_basic: 股票列表数据集合
-        collection_daily: 日线数据集合
+        config_path: 配置文件路径
         """
+        # 加载配置
+        self.config = load_config(config_path)
+        
         # 初始化 Tushare
-        self.token = tushare_token
-        ts.set_token(tushare_token)
+        tushare_config = self.config['tushare']
+        self.token = tushare_config['token']
+        ts.set_token(self.token)
         self.pro = ts.pro_api()
 
         # 初始化 MongoDB
-        self.client = MongoClient(mongo_uri)
-        self.db = self.client[db_name]
-        self.collection_basic = self.db[collection_basic]
-        self.collection_daily = self.db[collection_daily]
+        mongo_config = self.config['mongodb']
+        self.client = MongoClient(mongo_config['uri'])
+        self.db = self.client[tushare_config['db']]
+        self.collection_basic = self.db[tushare_config['collection_basic']]
+        self.collection_daily = self.db[tushare_config['collection_daily']]
         
-        # 为basic和daily集合创建索引
+        # 为 basic 和 daily 集合创建索引
         existing_indexes_basic = self.collection_basic.index_information()
         if "ts_code_1" not in existing_indexes_basic:
             self.collection_basic.create_index([("ts_code", ASCENDING)], unique=True)
@@ -86,6 +82,38 @@ class TushareManager:
         print("func:'fetch_stock_basic' finished")
         return
 
+    def fetch_one_day_data(self,
+                        trade_date: str = time.strftime('%Y%m%d', time.localtime()),
+                        max_retries:int = 3
+                        ):
+        for attempt in range(max_retries):
+            try:
+                df = self.pro.daily(
+                    trade_date = trade_date,
+                    fields = ["ts_code",
+                            "trade_date",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "pre_close",
+                            "change",
+                            "pct_chg",
+                            "vol",
+                            "amount"]
+                )
+
+                if df is not None and not df.empty:
+                    return df
+                else:
+                    print(f"No data for trade_date. Attempt {attempt+1}/{max_retries}.")
+
+            except Exception as e:
+                print(f"Error fetching data from day {trade_date}: {e}. Attempt {attempt+1}/{max_retries}.")
+            time.sleep(2)  # 等待2秒再重试
+        print(f"Failed to fetch data from day {trade_date} after {max_retries} attempts.")
+        return pd.DataFrame()
+
     # 获取日线数据（单支股票）
     def fetch_daily_data(self, 
                         ts_code: str, 
@@ -123,14 +151,16 @@ class TushareManager:
         return pd.DataFrame()
 
     # 将获取的日线数据保存到MongoDB
-    def save_to_mongo(self, df: pd.DataFrame, ts_code: str):
+    def save_to_mongo(self, df: pd.DataFrame, ts_code: str = None):
         if df is None or df.empty:
-            #print(f"{ts_code}: No data to save.")
+            print(f"No data to save. {ts_code} ")
             return
         records = df.to_dict('records')
         for r in records:
             query = {"ts_code": r["ts_code"], "trade_date": r["trade_date"]}
             self.collection_daily.update_one(query, {"$set": r}, upsert=True)
+        if not ts_code:
+            print("func save_to_mongo finished")
 
     def _fetch_and_save(self, ts_code: str, start_date: str, end_date: str):
         """
@@ -162,7 +192,7 @@ class TushareManager:
     def fetch_all_daily_data(self,
                             start_date: str = "20150101",
                             end_date: str = time.strftime('%Y%m%d', time.localtime()),
-                            max_threads: int = 10):
+                            max_threads: int = 30):
         """
         执行完整的数据获取、存储流程，多线程版本。
         tushare接口限制了每65秒内最多调取500次。

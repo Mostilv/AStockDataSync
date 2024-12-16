@@ -1,16 +1,15 @@
-from vnpy_ctastrategy.backtesting import BacktestingEngine, OptimizationSetting
+import os
+os.environ["PYTHONIOENCODING"] = "utf-8"
+
+from vnpy.trader.optimize import OptimizationSetting
+from vnpy_ctastrategy.backtesting import BacktestingEngine
 from vnpy_ctastrategy import CtaTemplate
 from vnpy.trader.setting import SETTINGS
 
 from datetime import datetime
-
-from data_manager.run import run_pipeline
 from strategies.double_ma import DoubleMaStrategy
+from data_manager.tushare import TushareManager
 
-
-
-import os
-os.environ["PYTHONIOENCODING"] = "utf-8"
 
 SETTINGS["database.name"] = "mongodb"
 SETTINGS["database.database"] = "vnpy"
@@ -35,9 +34,26 @@ def main():
     # engine.run_backtesting()
     # df = engine.calculate_result()
     # statistics = engine.calculate_statistics(output=True)
+    # print(1111111111111111)
     # engine.show_chart()
+
+    # setting = OptimizationSetting()
+    # setting.set_target("sharpe_ratio")
+    # setting.add_parameter("atr_length", 25, 27, 1)
+    # setting.add_parameter("atr_ma_length", 10, 30, 10)
+    # engine.run_ga_optimization(setting)
+    
     print('func main')
 
+def manage_tushare_data():
+    ts_manager = TushareManager()
+    
+    # ts_manager.fetch_stock_basic()
+    # ts_manager.fetch_all_daily_data()
+    df = ts_manager.fetch_one_day_data()
+    ts_manager.save_to_mongo(df)
+
 if __name__ == "__main__":
-    main()
+    manage_tushare_data()
+    
     
