@@ -3,14 +3,16 @@ from tqdm import tqdm
 from pymongo import MongoClient, ASCENDING
 import tushare as ts
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from utils.config_loader import load_config
 
 class TushareManager:
-    #TODO 1.记录每支股票最新数据的日期，用于获取数据时不重复获取
-    #     2.没有数据的股票最新日期为开始日期
+    """ TODO 
+        1.记录每支股票最新数据的日期，用于获取数据时不重复获取
+        2.没有数据的股票最新日期为开始日期
+        3.复权数据接口无效
+    """
     def __init__(self,config_path: str = 'config.yaml'):
         """
         初始化TushareManager对象。
@@ -31,8 +33,8 @@ class TushareManager:
         mongo_config = self.config['mongodb']
         self.client = MongoClient(mongo_config['uri'])
         self.db = self.client[tushare_config['db']]
-        self.collection_basic = self.db[tushare_config['collection_basic']]
-        self.collection_daily = self.db[tushare_config['collection_daily']]
+        self.collection_basic = self.db[tushare_config['basic']]
+        self.collection_daily = self.db[tushare_config['daily']]
         
         # 为 basic 和 daily 集合创建索引
         existing_indexes_basic = self.collection_basic.index_information()

@@ -8,7 +8,8 @@ from vnpy.trader.setting import SETTINGS
 
 from datetime import datetime
 from strategies.double_ma import DoubleMaStrategy
-from data_manager.tushare import TushareManager
+from data_manager.manager_tushare import TushareManager
+from data_manager.manager_baostock import BaostockManager
 
 
 SETTINGS["database.name"] = "mongodb"
@@ -53,7 +54,13 @@ def manage_tushare_data():
     df = ts_manager.fetch_one_day_data()
     ts_manager.save_to_mongo(df)
 
+def manage_baostock_data():
+    bs_manager = BaostockManager()
+    # bs_manager.get_stock_basic_info()
+    bs_manager.update_stocks_daily()
+    bs_manager.close()
+
 if __name__ == "__main__":
-    manage_tushare_data()
+    manage_baostock_data()
     
     

@@ -1,0 +1,14 @@
+# vn.py 生态系统
+vnpy
+vnpy-ctastrategy
+vnpy-mongodb
+
+# 数据处理与分析
+tushare
+pandas
+baostock
+pymongo
+pytz
+
+# 可视化与进度管理
+tqdm
