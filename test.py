@@ -1,22 +1,45 @@
-import baostock as bs
+# backtest_factor_strategy.py
 
-lg = bs.login()
-print("login respond  error_code:", lg.error_code)
-print("login respond  error_msg:", lg.error_msg)
+from vnpy_ctastrategy.backtesting import BacktestingEngine
+from vnpy.trader.setting import SETTINGS
+from datetime import datetime
 
-rs = bs.query_history_k_data_plus("sh.600000",
-    "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,psTTM,pcfNcfTTM,pbMRQ,isST",
-    start_date='2024-12-01', end_date='2024-12-31',
-    frequency="d", adjustflag="3")
+from strategies.test_factor_strategy import TestFactorStrategy
 
-print("query_history_k_data_plus respond  error_code:", rs.error_code)
-print("query_history_k_data_plus respond  error_msg:", rs.error_msg)
+SETTINGS["database.name"] = "mongodb"
+SETTINGS["database.database"] = "vnpy"
+SETTINGS["database.host"] = "127.0.0.1"
+SETTINGS["database.port"] = 27017
 
-# # 显示 ResultData 对象中所有属性名和方法
-print(dir(rs))
-print('============================================')
+def run_backtest():
+    engine = BacktestingEngine()
+    engine.set_parameters(
+        vt_symbol="600000.SSE",    # 模拟一个股票代码
+        interval="d",             # 使用日线
+        start=datetime(2014, 1, 1),
+        end=datetime(2024, 12, 1),
+        rate=0.0003,               # 手续费
+        slippage=0.01,             # 滑点
+        size=100,                  # 一手100股
+        pricetick=0.01,
+        capital=100000
+    )
 
-# 显示 ResultData 对象的所有实例属性及对应值
-print(rs.__dict__)
+    # 这里演示从CSV加载bar数据，如果没有CSV可注释掉自行提供数据
+    # engine.add_data(TestFactorStrategy, "your_data.csv")
 
-bs.logout()
+    # 添加策略
+    engine.add_strategy(TestFactorStrategy, {
+        "rsi_threshold_buy": 30,
+        "rsi_threshold_sell": 70,
+        "fixed_size": 1
+    })
+
+    engine.load_data()
+    engine.run_backtesting()
+    df = engine.calculate_result()
+    engine.calculate_statistics(output=True)
+    engine.show_chart(df)
+
+if __name__ == "__main__":
+    run_backtest()

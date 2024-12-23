@@ -20,25 +20,24 @@ SETTINGS["database.host"] = "127.0.0.1"
 SETTINGS["database.port"] = 27017
 
 def main():
-    # engine = BacktestingEngine()
-    # engine.set_parameters(
-    #     vt_symbol="600435.SSE",
-    #     interval="d",
-    #     start=datetime(2020, 1, 1),
-    #     end=datetime(2020, 12, 31),
-    #     rate=0.0005,
-    #     slippage=0.2,
-    #     size=100,
-    #     pricetick=0.01,
-    #     capital=1_000_000,
-    # )
-    # engine.add_strategy(DoubleMaStrategy, {"fast_window": 10, "slow_window": 20})
-    # engine.load_data()
-    # engine.run_backtesting()
-    # df = engine.calculate_result()
-    # statistics = engine.calculate_statistics(output=True)
-    # print(1111111111111111)
-    # engine.show_chart()
+    engine = BacktestingEngine()
+    engine.set_parameters(
+        vt_symbol="600435.SSE",
+        interval="d",
+        start=datetime(2021, 1, 1),
+        end=datetime(2023, 12, 31),
+        rate=0.0005,
+        slippage=0.2,
+        size=100,
+        pricetick=0.01,
+        capital=1_000_000,
+    )
+    engine.add_strategy(DoubleMaStrategy, {"fast_window": 10, "slow_window": 20})
+    engine.load_data()
+    engine.run_backtesting()
+    df = engine.calculate_result()
+    statistics = engine.calculate_statistics(output=True)
+    engine.show_chart()
 
     # setting = OptimizationSetting()
     # setting.set_target("sharpe_ratio")
@@ -68,6 +67,7 @@ def manage_vnpy_data():
     vnpy_db_manager.close()
     
 if __name__ == "__main__":
-    manage_vnpy_data()
-    
+    # manage_baostock_data()
+    # manage_vnpy_data()
+    main()
     

@@ -5,10 +5,11 @@ vnpy-mongodb
 
 # 数据处理与分析
 tushare
-pandas
 baostock
+pandas
 pymongo
 pytz
+TA-Lib
 
 # 可视化与进度管理
 tqdm
