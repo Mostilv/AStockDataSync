@@ -1,95 +1,84 @@
-# backtest_factor_strategy.py
+"""
+main.py
 
-from datetime import datetime
-
-# vn.py 相关
-from vnpy_ctastrategy.backtesting import BacktestingEngine
+1) 配置 vnpy 的 MongoDB 数据库
+2) 从 vnpy 库中的 BarOverview 表读取所有股票代码
+3) 调用批量回测函数
+4) 绘制平均资金曲线
+"""
+from vnpy_mongodb import Database
 from vnpy.trader.setting import SETTINGS
+from vnpy.trader.constant import Exchange, Interval
 
-# 策略示例
-from strategies.test_factor_strategy import TestFactorStrategy
-
-# 第三方可视化库
-import matplotlib.pyplot as plt
-
-# 1) 配置数据库连接（MongoDB）
+# 1) 配置 MongoDB
 SETTINGS["database.name"] = "mongodb"
 SETTINGS["database.database"] = "vnpy"
 SETTINGS["database.host"] = "127.0.0.1"
 SETTINGS["database.port"] = 27017
+# 如果有用户名/密码，请补充：
+# SETTINGS["database.user"] = "..."
+# SETTINGS["database.password"] = "..."
 
-def plot_backtest_result(df):
-    """
-    使用 Matplotlib 绘制回测的资金曲线等指标。
-    :param df: engine.calculate_result() 返回的 DataFrame，
-    一般包含 columns: ["date", "balance", "net_pnl", "drawdown", ...]
-    """
-    # 设置绘图风格
-    print(plt.style.available)  # 查看当前可用的样式列表
-    plt.style.use("ggplot")     # 例如 "ggplot" 是内置可用的样式
-    fig, ax = plt.subplots(figsize=(10, 6))
+# 2) 导入批量回测函数
+from backtesting.batch_backtest import run_batch_backtest, plot_average_capital_curve
 
-    # 如果 df 中有 date 列，就以 date 作为 x 轴；否则用索引
-    if "date" in df.columns:
-        x_data = df["date"]
+
+def read_all_stock_symbols() -> list:
+    """
+    从 vnpy 数据库的 BarOverview 集合获取所有股票代码列表（vt_symbol）。
+    只保留日线数据，且交易所是 SSE/SZSE（上证/深证）。
+    返回格式形如 ["600435.SSE", "301603.SZSE", ...].
+    """
+    db = Database()
+    overviews = db.get_bar_overview()  # 返回 List[BarOverview]
+
+    symbol_list = []
+    for ov in overviews:
+        # 1) 只保留 SSE(上证) / SZSE(深证)
+        # 2) 只保留日线 Interval.DAILY
+        if ov.exchange in [Exchange.SSE, Exchange.SZSE] and ov.interval == Interval.DAILY:
+            # 拼成 "symbol.exchange" 形式
+            vt_symbol = f"{ov.symbol}.{ov.exchange.value}"
+            symbol_list.append(vt_symbol)
+
+    return symbol_list
+
+
+def main():
+    """
+    项目主入口
+    1) 从数据库读取所有股票代码
+    2) 调用批量回测函数
+    3) 绘制平均资金曲线
+    """
+    print("=== 读取股票代码 ===")
+    symbol_list = read_all_stock_symbols()
+    print(f"共获取到 {len(symbol_list)} 条股票代码。")
+
+    # 这里示例只回测前 10 个股票，避免机器压力过大
+    # 若要全股票回测，请去掉下面这行
+    symbol_list = symbol_list[:1000]
+
+    print("=== 开始批量回测 ===")
+    df_average = run_batch_backtest(
+        symbol_list=symbol_list,
+        strategy_module="strategies.test_factor_strategy",   # 需要你自己在 strategies 下写好 demo_strategy.py
+        strategy_class_name="TestFactorStrategy",           # demo_strategy.py 中的策略类名
+        start_date="2014-01-01",
+        end_date="2024-01-01",
+        capital=1_000_000,
+        max_workers=4
+    )
+
+    if df_average.empty:
+        print("回测结果为空，请检查数据或策略。")
     else:
-        x_data = df.index  # 回退到默认索引
+        print("=== 绘制平均资金曲线 ===")
+        plot_average_capital_curve(df_average, "All Stock Average Capital (Top 10)")
 
-    # 绘制资金曲线
-    ax.plot(x_data, df["balance"], label="Balance Curve", color="blue", linewidth=1.0)
-
-    # （可选）再绘制回撤
-    if "drawdown" in df.columns:
-        ax.plot(x_data, df["drawdown"], label="Drawdown", color="red", linewidth=1.0)
-    
-    ax.set_title("Backtest Result")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Balance")
-    ax.grid(True)
-    ax.legend()
-
-    plt.show()
-
-
-def run_backtest():
-    engine = BacktestingEngine()
-    engine.set_parameters(
-        vt_symbol="600000.SSE",    # 模拟一个股票代码
-        interval="d",              # 使用日线
-        start=datetime(2014, 1, 1),
-        end=datetime(2024, 12, 1),
-        rate=0.0003,               # 手续费
-        slippage=0.01,             # 滑点
-        size=100,                  # 一手=100股
-        pricetick=0.01,
-        capital=100000
-    )
-
-    # 如果你有CSV可以直接加载，也可以注释掉
-    # engine.add_data(TestFactorStrategy, "your_data.csv")
-
-    # 添加策略
-    engine.add_strategy(
-        TestFactorStrategy,
-        {
-            "rsi_threshold_buy": 30,
-            "rsi_threshold_sell": 70,
-            "fixed_size": 1
-        }
-    )
-
-    # 加载数据 & 运行回测
-    engine.load_data()
-    engine.run_backtesting()
-
-    # 2) 获取回测结果
-    df = engine.calculate_result()
-
-    # 3) 打印统计结果(收益、回撤等)，并绘图
-    engine.calculate_statistics(output=True)
-    plot_backtest_result(df)
+    print("=== 结束 ===")
 
 
 if __name__ == "__main__":
-    run_backtest()
+    main()
 
