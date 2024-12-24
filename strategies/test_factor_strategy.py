@@ -74,10 +74,10 @@ class TestFactorStrategy(CtaTemplate):
         close_array = self.am.close  # numpy array
         factor_result = self.factor_manager.calculate_factors(
             close_array, 
-            factor_names=["RSI_NP", "MACD_NP"]
+            factor_names=["RSI", "MACD"]
         )
-        self.rsi_value = factor_result.get("RSI_NP", None)
-        self.macd_value = factor_result.get("MACD_NP", None)
+        self.rsi_value = factor_result.get("RSI", None)
+        self.macd_value = factor_result.get("MACD", None)
 
         # 简单的买卖逻辑
         if self.rsi_value is not None and self.rsi_value < self.rsi_threshold_buy:

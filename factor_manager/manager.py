@@ -26,7 +26,7 @@ class FactorManager:
                           factor_names: Optional[List[str]] = None
                           ) -> Dict[str, float]:
         """
-        基于收盘价数组(or 其他数组)计算指定因子。
+        基于收盘价数组(or 其他数组)计算指定因子。只计算最新值
         :param close_array: 收盘价序列。
         :param factor_names: 要计算的因子名；None表示计算全部
         :return: {因子名称: 因子值} 
@@ -42,3 +42,4 @@ class FactorManager:
             val = func(close_array)  # 这里直接把 close_array 传进去
             result[name] = val
         return result
+    
