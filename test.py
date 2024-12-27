@@ -20,7 +20,7 @@ SETTINGS["database.port"] = 27017
 # SETTINGS["database.password"] = "..."
 
 # 2) 导入批量回测函数
-from backtesting.batch_backtest import run_batch_backtest, plot_average_capital_curve
+from backtesting.batch_backtest import run_batch_backtest, plot_average_capital_curve, process_statistics
 
 
 def read_all_stock_symbols() -> list:
@@ -57,10 +57,10 @@ def main():
 
     # 这里示例只回测前 10 个股票，避免机器压力过大
     # 若要全股票回测，请去掉下面这行
-    symbol_list = symbol_list[:1000]
+    symbol_list = symbol_list[:10]
 
     print("=== 开始批量回测 ===")
-    df_average = run_batch_backtest(
+    df_capital, df_stats = run_batch_backtest(
         symbol_list=symbol_list,
         strategy_module="strategies.test_factor_strategy",   # 需要你自己在 strategies 下写好 demo_strategy.py
         strategy_class_name="TestFactorStrategy",           # demo_strategy.py 中的策略类名
@@ -70,11 +70,10 @@ def main():
         max_workers=4
     )
 
-    if df_average.empty:
-        print("回测结果为空，请检查数据或策略。")
-    else:
-        print("=== 绘制平均资金曲线 ===")
-        plot_average_capital_curve(df_average, "All Stock Average Capital (Top 10)")
+    # 打印统计指标
+    process_statistics(df_stats)
+    # 绘制资金曲线
+    plot_average_capital_curve(df_capital)
 
     print("=== 结束 ===")
 
