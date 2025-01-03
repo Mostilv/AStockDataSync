@@ -1,3 +1,4 @@
+#垃圾tushare，变相收费，tui
 import time
 from tqdm import tqdm
 from pymongo import MongoClient, ASCENDING

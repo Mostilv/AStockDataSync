@@ -7,6 +7,7 @@ from vnpy.trader.constant import Exchange, Interval
 from vnpy_mongodb import Database
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
+from utils.config_loader import load_config
 
 LOCAL_TZ = pytz.timezone("Asia/Shanghai")
 
@@ -14,7 +15,7 @@ class VnpyDBManager:
     def __init__(self, config_path: str = 'config.yaml'):
         """初始化数据库管理器"""
         # 加载配置文件
-        from utils.config_loader import load_config
+        
         self.config = load_config(config_path)
 
         # 初始化 vnpy_mongodb 数据库

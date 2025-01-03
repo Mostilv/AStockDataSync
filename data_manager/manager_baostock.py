@@ -1,4 +1,5 @@
 import baostock as bs
+import time
 from pymongo import MongoClient, ASCENDING
 from datetime import datetime, timedelta
 from tqdm import tqdm
@@ -47,7 +48,7 @@ class BaostockManager:
         bs.logout()
         self.client.close()
 
-    def _get_stock_list_from_bs(self):
+    def query_stock_basic(self):
         """
         从baostock获取A股基本信息列表。
         """
@@ -57,12 +58,12 @@ class BaostockManager:
 
         # 验证字段是否匹配
         if rs.fields != expected_fields:
-            raise ValueError(f"_get_stock_list_from_bs: Fields do not match the expected format. Expected: {expected_fields}, but got: {rs.fields}")
+            raise ValueError(f"query_stock_basic func: Fields do not match the expected format. Expected: {expected_fields}, but got: {rs.fields}")
             
         while rs.next():
             row = rs.get_row_data()
             # 保持与baostock字段一致
-            if row[4] == '1' and row[5] == '1':
+            if row[4] == '1' and row[5] == '1':  #4 股票 5 上市
                 stock_info = {
                     "code": row[0],
                     "code_name": row[1],
@@ -72,13 +73,7 @@ class BaostockManager:
                     "status": row[5]
                 }
                 stock_list.append(stock_info)
-        return stock_list
-
-    def get_stock_basic_info(self):
-        """
-        对外接口：获取股票基本信息并存入数据库。
-        """
-        stock_list = self._get_stock_list_from_bs()
+                
         for stock in stock_list:
             self.stock_basic_col.update_one(
                 {"code": stock["code"]},
@@ -87,7 +82,7 @@ class BaostockManager:
             )
         print(f"股票基本信息更新完成，共更新 {len(stock_list)} 条记录。")
 
-    def _get_daily_data_from_bs(self, code, start_date, end_date):
+    def query_history_k_data_plus(self, code, start_date, end_date):
         # 使用官方提供的字段名称
         expected_fields = ['date', 'code', 'open', 'high', 'low', 'close', 'preclose', 'volume', 'amount', 'adjustflag', 'turn', 'tradestatus', 'pctChg', 'peTTM', 'psTTM', 'pcfNcfTTM', 'pbMRQ', 'isST']
         for attempt in range(RETRY_LIMIT):
@@ -138,15 +133,14 @@ class BaostockManager:
         print(f"获取{code}日线数据失败，超出最大重试次数。")
         return []
 
-    def _get_last_daily_date(self, code):
-        doc = self.stock_basic_col.find_one({"code": code}, {"last_daily_date": 1})
-        return doc.get("last_daily_date") if doc else None
+    def query_all_stock(self,day:str="2024-10-25"):
+        #### 获取某日所有证券信息 ####
+        rs = bs.query_all_stock(day)
+        #TODO 保存到db
 
-    def _set_last_daily_date(self, code, date_str):
-        self.stock_basic_col.update_one({"code": code}, {"$set": {"last_daily_date": date_str}})
-
-    def update_stocks_daily(self):
-        """单线程增量更新全市场日线数据"""
+    def update_data(self):
+        """批量更新所有数据，包括价格和基本面等"""
+        #价格数据:
         stock_list = list(self.stock_basic_col.find({}, {"code": 1, "last_daily_date": 1}))
         end_date = datetime.now().strftime(DATE_FORMAT)
 
@@ -172,4 +166,6 @@ class BaostockManager:
                     except Exception as e:
                         print(f"写入数据库时出错: {e}")
                 pbar.update(1)
+                
+        #基本面
 

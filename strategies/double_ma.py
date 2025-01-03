@@ -1,49 +1,97 @@
-from vnpy_ctastrategy import (
-    CtaTemplate,
-    BarData,
-    ArrayManager
-)
+from datetime import datetime
+import numpy as np
+from vnpy.trader.utility import BarGenerator
+from vnpy.trader.object import BarData
+from vnpy_portfoliostrategy import StrategyTemplate, StrategyEngine
 
-class DoubleMaStrategy(CtaTemplate):
-    author = "YourName"
+class SimpleMovingAverageStrategy(StrategyTemplate):
+    """简单双均线策略，应用于全市场股票"""
 
-    fast_window = 10
-    slow_window = 30
+    author = "用Python的交易员"
+    
+    short_window = 20     # 短期均线
+    long_window = 60      # 长期均线
+    fixed_size = 1        # 每次买入/卖出的数量
 
-    parameters = ["fast_window", "slow_window"]
-    variables = []
+    parameters = [
+        "short_window",
+        "long_window",
+        "fixed_size",
+    ]
+    
+    variables = [
+        "short_window",
+        "long_window",
+    ]
 
-    def __init__(self, cta_engine, strategy_name, vt_symbol, setting):
-        super().__init__(cta_engine, strategy_name, vt_symbol, setting)
-        self.am = ArrayManager(max(self.fast_window, self.slow_window) + 10)
+    def __init__(
+        self,
+        strategy_engine: StrategyEngine,
+        strategy_name: str,
+        vt_symbols: list[str],
+        setting: dict
+    ) -> None:
+        """构造函数"""
+        super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
 
-    def on_init(self):
+        self.bgs: dict[str, BarGenerator] = {}
+        self.last_tick_time: datetime = None
+
+        # 每个股票的短期和长期均线
+        self.short_moving_avg = {}
+        self.long_moving_avg = {}
+
+        def on_bar(bar: BarData):
+            """""" 
+            pass
+
+        # 初始化BarGenerator
+        for vt_symbol in self.vt_symbols:
+            self.bgs[vt_symbol] = BarGenerator(on_bar)
+
+    def on_init(self) -> None:
+        """策略初始化回调"""
         self.write_log("策略初始化")
-        # 加载一定数量的历史K线用于初始化均线
-        self.load_bar(30)
+        self.load_bars(1)
 
-    def on_start(self):
+    def on_start(self) -> None:
+        """策略启动回调"""
         self.write_log("策略启动")
 
-    def on_bar(self, bar: BarData):
-        self.am.update_bar(bar)
-        if not self.am.inited:
-            return
+    def on_stop(self) -> None:
+        """策略停止回调"""
+        self.write_log("策略停止")
 
-        fast_ma = self.am.sma(self.fast_window, array=True)
-        slow_ma = self.am.sma(self.slow_window, array=True)
+    def on_bars(self, bars: dict[str, BarData]) -> None:
+        """K线切片回调"""
+        for vt_symbol, bar in bars.items():
+            # 更新均线数据
+            if vt_symbol not in self.short_moving_avg:
+                self.short_moving_avg[vt_symbol] = [bar.close_price]
+            else:
+                self.short_moving_avg[vt_symbol].append(bar.close_price)
 
-        # 判断刚刚形成的K线（[-1]）和上一根K线（[-2]）的均线位置关系
-        if fast_ma[-1] > slow_ma[-1] and fast_ma[-2] <= slow_ma[-2]:
-            # 金叉，买入
-            self.buy(bar.close_price, 1)
-        elif fast_ma[-1] < slow_ma[-1] and fast_ma[-2] >= slow_ma[-2]:
-            # 死叉，卖出（平仓）
-            self.sell(bar.close_price, 1)
+            if vt_symbol not in self.long_moving_avg:
+                self.long_moving_avg[vt_symbol] = [bar.close_price]
+            else:
+                self.long_moving_avg[vt_symbol].append(bar.close_price)
 
-    def on_trade(self, trade):
-        pass
+            # 保持均线序列的长度
+            if len(self.short_moving_avg[vt_symbol]) > self.short_window:
+                self.short_moving_avg[vt_symbol].pop(0)
+            if len(self.long_moving_avg[vt_symbol]) > self.long_window:
+                self.long_moving_avg[vt_symbol].pop(0)
 
-    def on_stop_order(self, stop_order):
-        pass
+            # 计算当前的短期和长期均线
+            short_avg = np.mean(self.short_moving_avg[vt_symbol])
+            long_avg = np.mean(self.long_moving_avg[vt_symbol])
 
+            # 策略逻辑：双均线策略，短期均线上穿长期均线时买入，短期均线下穿长期均线时卖出
+            if short_avg > long_avg and self.get_pos(vt_symbol) == 0:
+                # 买入信号
+                self.set_target(vt_symbol, self.fixed_size)
+            elif short_avg < long_avg and self.get_pos(vt_symbol) > 0:
+                # 卖出信号
+                self.set_target(vt_symbol, 0)
+        # 推送更新事件
+        self.put_event()
