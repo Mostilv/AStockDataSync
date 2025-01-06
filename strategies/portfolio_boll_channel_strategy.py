@@ -149,45 +149,44 @@ class PortfolioBollChannelStrategy(StrategyTemplate):
                 if bar.close_price >= short_stop:
                     self.targets[vt_symbol] = 0
 
-        # 基于目标仓位进行委托
+        # 只做多策略：基于目标仓位进行委托
         for vt_symbol in self.vt_symbols:
             if vt_symbol not in self.targets:
                 self.write_log(f"Missing target position for {vt_symbol}, skipping.")
                 continue  # 如果没有目标仓位，跳过这个符号
 
-            target_pos = self.targets[vt_symbol]
+            target_pos = max(self.targets[vt_symbol], 0)  # 目标仓位不能为负
             current_pos = self.get_pos(vt_symbol)
 
             pos_diff = target_pos - current_pos
             volume = abs(pos_diff)
-            bar = bars.get(vt_symbol)
 
+            if volume == 0:
+                continue  # 没有仓位变化，不执行交易
+
+            bar = bars.get(vt_symbol)
             if bar is None:
                 self.write_log(f"Missing bar data for {vt_symbol}, skipping.")
                 continue  # 如果没有对应的bar数据，跳过此符号
 
             boll_up = self.boll_up.get(vt_symbol)
-            boll_down = self.boll_down.get(vt_symbol)
 
+            if boll_up is None:
+                self.write_log(f"Missing Bollinger upper band for {vt_symbol}, skipping.")
+                continue  # 没有布林带上轨数据，跳过
+
+            # 计算交易价格
+            buy_price = max(bar.close_price + self.price_add, boll_up)  # 确保买入价合理
+            sell_price = bar.close_price - self.price_add  # 卖出价略低于当前价格
+
+            # 处理多头交易逻辑
             if pos_diff > 0:
-                price = bar.close_price + self.price_add
-
-                if current_pos < 0:
-                    print('cover')
-                    self.cover(vt_symbol, price, volume)
-                else:
-                    print('buy')
-                    self.buy(vt_symbol, boll_up, volume)
+                self.write_log(f"{vt_symbol}: Buying {volume} @ {boll_up}")
+                self.buy(vt_symbol, boll_up, volume)
 
             elif pos_diff < 0:
-                price = bar.close_price - self.price_add
-
-                if current_pos > 0:
-                    print('sell')
-                    self.sell(vt_symbol, price, volume)
-                else:
-                    print('short')
-                    self.short(vt_symbol, boll_down, volume)
+                self.write_log(f"{vt_symbol}: Selling {volume} @ {sell_price}")
+                self.sell(vt_symbol, sell_price, volume)
 
         # 推送界面更新
         self.put_event()

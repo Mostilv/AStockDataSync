@@ -1,12 +1,8 @@
+# 组合策略回测(PortfolioStrategy)
 from datetime import datetime
-from importlib import reload
-
-import vnpy_portfoliostrategy
-reload(vnpy_portfoliostrategy)
 
 from vnpy_portfoliostrategy import BacktestingEngine
 from vnpy.trader.constant import Interval
-
 
 from vnpy_mongodb import Database
 from vnpy.trader.setting import SETTINGS
@@ -37,7 +33,7 @@ def get_all_stock_symbols() -> list:
             vt_symbol = f"{ov.symbol}.{ov.exchange.value}"
             vt_symbols.append(vt_symbol)
 
-    return vt_symbols[:100]
+    return vt_symbols
 
 vt_symbols = get_all_stock_symbols()
 # 为每个股票生成默认参数，以下是生成示例，你可以根据实际情况修改每个股票的参数

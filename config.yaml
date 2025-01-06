@@ -2,16 +2,10 @@
 mongodb:
   uri: "mongodb://localhost:27017/"
 
-# Tushare配置
-tushare:
-  token: "b8a293cd8e00b775f3b410f1140d0402ea9fc103b0eac5a408e62cee"
-  db: "tushare"
-  basic: "stock_basic"
-  daily: "daily"
-
 #baostock配置
 baostock:
   db: "baostock"
   basic: "stock_basic"
   daily: "daily_adjusted"
-  # minute: "minute_adjusted"
+  minute_15: "minute_15_adjusted"
+  minute_60: "minute_60_adjusted"
