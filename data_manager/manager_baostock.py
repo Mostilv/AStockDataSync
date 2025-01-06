@@ -172,7 +172,7 @@ class BaostockManager:
         #TODO 保存到db
 
     #-----------------------------------------------------------------------
-    def update_stock_data(self, full_update=False):
+    def update_stock_k_data(self, full_update=False):
         """
         更新股票 K 线数据（支持日线 & 15m & 60m）
         
