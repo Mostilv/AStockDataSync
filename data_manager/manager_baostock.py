@@ -52,10 +52,10 @@ class BaostockManager:
             self.daily_col.create_index([("code", ASCENDING), ("date", ASCENDING)], unique=True)
         
         # 分钟K线数据表对(code, datetime)唯一索引
-        if "code_1_datetime_1" not in self.minute_15_col.index_information():
-            self.minute_15_col.create_index([("code", ASCENDING), ("datetime", ASCENDING)], unique=True)
-        if "code_1_datetime_1" not in self.minute_60_col.index_information():
-            self.minute_60_col.create_index([("code", ASCENDING), ("datetime", ASCENDING)], unique=True)
+        if "code_1_date_1_time_1" not in self.minute_15_col.index_information():
+            self.minute_15_col.create_index([("code", ASCENDING), ("date", ASCENDING),("time", ASCENDING)], unique=True)
+        if "code_1_date_1_time_1" not in self.minute_60_col.index_information():
+            self.minute_60_col.create_index([("code", ASCENDING), ("date", ASCENDING),("time", ASCENDING)], unique=True)
         
         return
 
@@ -79,7 +79,7 @@ class BaostockManager:
             
         while rs.next():
             row = rs.get_row_data()
-            if row[5] == '1' and row[4] in ['1', '2', '5']:  # 股票状态为上市，且 type 为 1、2、5
+            if row[5] == '1' and row[4] in ['1', '2']:  # 股票状态为上市，且 type 为 1、2、5
                 stock_info = {
                     "code": row[0],
                     "code_name": row[1],
