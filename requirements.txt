@@ -5,7 +5,7 @@ vnpy_portfoliostrategy
 vnpy-mongodb
 
 # 数据处理与分析
-tushare
+akshare
 baostock
 pandas
 pymongo

@@ -64,9 +64,10 @@ class BaostockManager:
         self.client.close()
         print("已登出baostock并关闭MongoDB连接")
     
-    def query_stock_basic(self):
+    def query_stock_basic(self, refresh=False):
         """
         从baostock获取A股基本信息列表。
+        :param refresh: 是否强制刷新数据。如果为True，则删除所有数据并重新插入。
         """
         expected_fields = ['code', 'code_name', 'ipoDate', 'outDate', 'type', 'status']
         rs = bs.query_stock_basic()
@@ -78,8 +79,7 @@ class BaostockManager:
             
         while rs.next():
             row = rs.get_row_data()
-            # 保持与baostock字段一致
-            if row[4] == '1' and row[5] == '1':  #4 股票 5 上市
+            if row[5] == '1' and row[4] in ['1', '2', '5']:  # 股票状态为上市，且 type 为 1、2、5
                 stock_info = {
                     "code": row[0],
                     "code_name": row[1],
@@ -89,13 +89,20 @@ class BaostockManager:
                     "status": row[5]
                 }
                 stock_list.append(stock_info)
-                
-        for stock in stock_list:
-            self.stock_basic_col.update_one(
-                {"code": stock["code"]},
-                {"$set": stock},
-                upsert=True
-            )
+        
+        if refresh:
+            # 删除所有数据并重新插入
+            self.stock_basic_col.delete_many({})
+            self.stock_basic_col.insert_many(stock_list)
+        else:
+            # 更新数据并删除不必要的字段
+            for stock in stock_list:
+                self.stock_basic_col.update_one(
+                    {"code": stock["code"]},
+                    {"$set": stock, "$unset": {"last_daily_date": 1, "last_minute_15_date": 1, "last_minute_60_date": 1}},
+                    upsert=True
+                )
+        
         print(f"股票基本信息更新完成，共更新 {len(stock_list)} 条记录。")
 
     def query_history_k_data_plus(self, code, start_date, end_date, frequency='d'):
@@ -188,7 +195,7 @@ class BaostockManager:
 
         # 需要更新的数据类型（周期, 对应的MongoDB集合, 在 `stock_basic_col` 中的字段名）
         data_types = [
-            ('d', self.daily_col, "last_daily_date"),
+            # ('d', self.daily_col, "last_daily_date"),
             ('15', self.minute_15_col, "last_minute_15_date"),
             ('60', self.minute_60_col, "last_minute_60_date")
         ]
