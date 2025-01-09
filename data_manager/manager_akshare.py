@@ -33,7 +33,7 @@ TRADING_PERIODS = [
 SYMBOL_LIST = ["000001", "000002", "600519"]  # 例如：平安银行(000001)、万科A(000002)、贵州茅台(600519)
 
 # 抓取间隔（秒）
-SLEEP_SEC = 3.0
+SLEEP_SEC = 5.0
 
 # 时区设置
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
@@ -130,10 +130,16 @@ class TimeframeAggregator:
         if self.current_bar_start is None:
             return
 
+        # **转换为北京时间**
+        beijing_time = self.current_bar_start.astimezone(pytz.timezone("Asia/Shanghai"))
+
+        # **转换为字符串格式：YYYY-MM-DD HH:MM:SS**
+        time_str = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
+        
         bar_dict = {
             "symbol": self.symbol,
             "timeframe": self.timeframe,
-            "datetime": self.current_bar_start,
+            "datetime": time_str,
             "open": self.open_price,
             "high": self.high_price,
             "low": self.low_price,
@@ -145,13 +151,6 @@ class TimeframeAggregator:
             logging.info(f"保存 K 线到 MongoDB: {bar_dict}")
         except errors.PyMongoError as e:
             logging.error(f"MongoDB 插入失败: {e}")
-
-    def finalize(self):
-        """
-        在脚本退出前，若当前 Bar 未收口，可手动写入一次
-        """
-        self._save_finished_bar()
-        logging.info(f"{self.symbol} [{self.timeframe}] 已保存当前 K 线到 MongoDB.")
 
 
 def is_trading_time(now: datetime) -> bool:
@@ -224,101 +223,70 @@ def create_indexes(collection_kline, collection_daily):
             unique=True,
             name="symbol_timeframe_datetime_idx"
         )
-        logging.info("已在 'kline' 集合上创建复合唯一索引: symbol + timeframe + datetime")
+        logging.info("已在 'kline' 集合上创建索引")
 
-        # 为日线数据创建复合唯一索引：symbol + date
+        # 为日线数据创建索引：symbol + date
         collection_daily.create_index(
             [("symbol", ASCENDING), ("date", ASCENDING)],
             unique=True,
             name="symbol_date_idx"
         )
-        logging.info("已在 'daily' 集合上创建复合唯一索引: symbol + date")
-
+        logging.info("已在 'daily' 集合上创建索引")
     except errors.PyMongoError as e:
-        logging.error(f"创建索引时发生错误: {e}")
+        logging.error(f"MongoDB 索引创建失败: {e}")
 
 
 def main():
-    # 连接 MongoDB
-    try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        client.admin.command('ping')  # 测试连接
-        db = client[MONGO_DB]
-        collection_kline = db[MONGO_COLLECTION_KLINE]
-        collection_daily = db[MONGO_COLLECTION_DAILY]
-        logging.info("成功连接到 MongoDB.")
-    except errors.ConnectionFailure as e:
-        logging.error(f"无法连接到 MongoDB: {e}")
-        return
-
-    # 创建索引
+    # 连接 MongoDB 数据库
+    client = MongoClient(MONGO_URI)
+    db = client[MONGO_DB]
+    collection_kline = db[MONGO_COLLECTION_KLINE]
+    collection_daily = db[MONGO_COLLECTION_DAILY]
+    
+    # 创建必要的索引
     create_indexes(collection_kline, collection_daily)
-
-    # 创建聚合器
-    aggregator_dict = {}
-    for sym in SYMBOL_LIST:
-        aggregator_dict[sym] = {
-            '15m': TimeframeAggregator('15m', sym, collection_kline),
-            '60m': TimeframeAggregator('60m', sym, collection_kline)
-        }
-
-    # 记录每个股票的上一笔累计成交量，用于计算增量
-    last_cum_volume = {sym: None for sym in SYMBOL_LIST}
-
-    logging.info(f"开始实时抓取以下股票：{SYMBOL_LIST}")
-    logging.info("将合成 15m 和 60m K 线，日线数据则直接存储。按 Ctrl+C 停止程序。")
-
+    
+    # 创建实时数据抓取和 K 线生成器
+    aggregators_15m = {symbol: TimeframeAggregator("15m", symbol, collection_kline) for symbol in SYMBOL_LIST}
+    aggregators_60m = {symbol: TimeframeAggregator("60m", symbol, collection_kline) for symbol in SYMBOL_LIST}
+    
     while True:
-        now = datetime.now(BEIJING_TZ)
-
-        if is_trading_time(now):
+        try:
+            now = datetime.now(BEIJING_TZ)
+            
+            if not is_trading_time(now):  # 如果当前不是交易时间，跳过
+                logging.info(f"当前时间 {now.strftime('%Y-%m-%d %H:%M:%S')} 不是交易时间。")
+                time.sleep(SLEEP_SEC)
+                continue
+            
+            # 获取实时行情数据
             df_quotes = get_realtime_quotes(SYMBOL_LIST)
+
             if not df_quotes.empty:
                 for _, row in df_quotes.iterrows():
-                    sym = row['代码']
-                    last_price = float(row['最新价'])
-                    cum_vol = float(row['成交量']) if not pd.isna(row['成交量']) else 0.0
+                    symbol = row['代码']
+                    last_price = row['最新价']
+                    volume = row['成交量']
 
-                    # 计算增量成交量
-                    if last_cum_volume[sym] is not None:
-                        vol_increment = cum_vol - last_cum_volume[sym]
-                        if vol_increment < 0:
-                            # 跨日或数据异常，重置增量
-                            vol_increment = cum_vol
-                            logging.warning(f"{sym} 累计成交量减少，重置增量成交量为 {vol_increment}")
-                    else:
-                        vol_increment = 0.0  # 第一笔数据不计算增量
+                    # 更新 15 分钟 K 线
+                    aggregators_15m[symbol].update_bar(now, last_price, volume)
+                    # 更新 60 分钟 K 线
+                    aggregators_60m[symbol].update_bar(now, last_price, volume)
 
-                    last_cum_volume[sym] = cum_vol
+                # 每日结束时更新日线数据
+                current_date = now.strftime("%Y-%m-%d")
+                for _, row in df_quotes.iterrows():
+                    symbol = row['代码']
+                    save_daily_data(collection_daily, symbol, row, current_date)
 
-                    # 更新聚合器
-                    for timeframe, aggregator in aggregator_dict[sym].items():
-                        aggregator.update_bar(now, last_price, vol_increment)
+            time.sleep(SLEEP_SEC)
 
-                    # 保存日线数据（只保存日期部分）
-                    current_date = now.strftime("%Y-%m-%d")
-                    save_daily_data(collection_daily, sym, row, current_date)
-
-                    logging.info(f"[{now.strftime('%H:%M:%S')}] {sym} 最新价={last_price:.2f} 增量成交量={vol_increment:.2f}")
-            else:
-                logging.warning("未获取到任何实时数据。")
-        else:
-            logging.info("当前不在交易时间，等待交易时间开始。")
-
-        time.sleep(SLEEP_SEC)
-
+        except KeyboardInterrupt:
+            logging.info("手动中断，程序退出。")
+            break
+        except Exception as e:
+            logging.error(f"程序运行发生异常: {e}")
+            time.sleep(SLEEP_SEC)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logging.info("检测到手动中断，开始程序终止过程...")
-    except Exception as e:
-        logging.error(f"程序发生未捕获的异常: {e}")
-    finally:
-        # 在程序退出前，保存所有聚合器的当前 Bar
-        for sym in SYMBOL_LIST:
-            for timeframe, aggregator in {'15m': '15m', '60m': '60m'}.items():
-                aggregator.finalize()
-        logging.info("程序已终止。")
-
+    main()
