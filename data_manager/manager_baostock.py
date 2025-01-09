@@ -195,7 +195,7 @@ class BaostockManager:
 
         # 需要更新的数据类型（周期, 对应的MongoDB集合, 在 `stock_basic_col` 中的字段名）
         data_types = [
-            # ('d', self.daily_col, "last_daily_date"),
+            ('d', self.daily_col, "last_daily_date"),
             ('15', self.minute_15_col, "last_minute_15_date"),
             ('60', self.minute_60_col, "last_minute_60_date")
         ]
