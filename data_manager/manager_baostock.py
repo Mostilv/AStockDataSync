@@ -99,7 +99,7 @@ class BaostockManager:
             for stock in stock_list:
                 self.stock_basic_col.update_one(
                     {"code": stock["code"]},
-                    {"$set": stock, "$unset": {"last_daily_date": 1, "last_minute_15_date": 1, "last_minute_60_date": 1}},
+                    {"$set": stock},
                     upsert=True
                 )
         
@@ -195,8 +195,8 @@ class BaostockManager:
 
         # 需要更新的数据类型（周期, 对应的MongoDB集合, 在 `stock_basic_col` 中的字段名）
         data_types = [
-            ('d', self.daily_col, "last_daily_date"),
-            ('15', self.minute_15_col, "last_minute_15_date"),
+            # ('d', self.daily_col, "last_daily_date"),
+            # ('15', self.minute_15_col, "last_minute_15_date"),
             ('60', self.minute_60_col, "last_minute_60_date")
         ]
 

@@ -2,7 +2,7 @@
 vnpy
 vnpy-ctastrategy
 vnpy_portfoliostrategy
-vnpy-mongodb
+  vnpy-mongodb
 
 # 数据处理与分析
 akshare
@@ -11,6 +11,7 @@ pandas
 pymongo
 pytz
 TA-Lib
+PyYAML
 
 # 可视化与进度管理
 tqdm
