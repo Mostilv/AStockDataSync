@@ -1,11 +1,22 @@
-# MongoDB配置
+# MongoDB 配置
 mongodb:
   uri: "mongodb://localhost:27017/"
 
-#baostock配置
+# baostock 配置
 baostock:
   db: "baostock"
   basic: "stock_basic"
   daily: "daily_adjusted"
   minute_15: "minute_15_adjusted"
   minute_60: "minute_60_adjusted"
+  history_years: 10           # 默认回溯年限，可通过脚本/CLI 覆盖
+  frequencies: ["d", "60"]    # 启用的周期，支持 d/15/60
+
+# akshare 配置
+akshare:
+  db: "akshare_realtime"
+  kline: "kline"
+  daily: "daily"
+  symbols: []                 # 留空时自动读取 baostock.basic 中的 code
+  timeframes: ["15m", "60m"]  # 需要合成的周期
+  sleep_seconds: 5            # 实时循环模式的轮询间隔

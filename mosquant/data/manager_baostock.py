@@ -1,15 +1,20 @@
 import baostock as bs
 import time
-from pymongo import MongoClient, UpdateOne, ASCENDING
-from pymongo.errors import BulkWriteError
 from datetime import datetime, timedelta
+from typing import Optional, Sequence, Tuple
+
+from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
+from pymongo.collection import Collection
+from pymongo.errors import BulkWriteError
 from tqdm import tqdm
-from utils.config_loader import load_config
+
+from mosquant.utils.config_loader import load_config
 
 START_DATE = "2014-01-01"
 ADJUSTFLAG = "3"
 DATE_FORMAT = "%Y-%m-%d"
 RETRY_LIMIT = 3  # 请求失败重试次数
+DAYS_PER_YEAR = 365
 
 class BaostockManager:
     def __init__(self, config_path: str = 'config.yaml'):
@@ -31,6 +36,14 @@ class BaostockManager:
         self.daily_col = self.db[baostock_cfg['daily']]
         self.minute_15_col = self.db[baostock_cfg['minute_15']]
         self.minute_60_col = self.db[baostock_cfg['minute_60']]
+
+        self.history_years = int(baostock_cfg.get("history_years", 10))
+        self.default_frequencies: Tuple[str, ...] = tuple(baostock_cfg.get("frequencies", ["d", "60"]))
+        self.collection_meta = {
+            "d": (self.daily_col, "last_daily_date"),
+            "15": (self.minute_15_col, "last_minute_15_date"),
+            "60": (self.minute_60_col, "last_minute_60_date"),
+        }
 
         # 创建索引
         self._create_indexes()
@@ -63,6 +76,12 @@ class BaostockManager:
         bs.logout()
         self.client.close()
         print("已登出baostock并关闭MongoDB连接")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
     
     def query_stock_basic(self, refresh=False):
         """
@@ -178,69 +197,102 @@ class BaostockManager:
         rs = bs.query_all_stock(day)
         #TODO 保存到db
 
+    def _get_collection_meta(self, frequency: str) -> Tuple[Collection, str]:
+        if frequency not in self.collection_meta:
+            raise ValueError(f"不支持的频率 {frequency}，允许值: {list(self.collection_meta.keys())}")
+        return self.collection_meta[frequency]
+
+    def _latest_date_in_collection(self, collection: Collection, code: str) -> Optional[str]:
+        record = collection.find_one({"code": code}, {"date": 1}, sort=[("date", DESCENDING)])
+        return record.get("date") if record else None
+
+    def _resolve_start_date(
+        self,
+        last_date: Optional[str],
+        full_update: bool,
+        lookback_years: int,
+        end_dt: datetime,
+    ) -> Optional[str]:
+        if full_update:
+            candidate = datetime.strptime(START_DATE, DATE_FORMAT)
+        elif last_date:
+            candidate = datetime.strptime(last_date, DATE_FORMAT) + timedelta(days=1)
+        else:
+            lookback_dt = end_dt - timedelta(days=lookback_years * DAYS_PER_YEAR)
+            candidate = max(datetime.strptime(START_DATE, DATE_FORMAT), lookback_dt)
+
+        if candidate > end_dt:
+            return None
+        return candidate.strftime(DATE_FORMAT)
+
+
     #-----------------------------------------------------------------------
-    def update_stock_k_data(self, full_update=False):
-        """
-        更新股票 K 线数据（支持日线 & 15m & 60m）
-        
-        参数：
-        - full_update (bool): 是否进行全量更新。默认 False（增量更新）。
-        - `False` 只更新 `last_date` 之后的数据（默认）。
-        - `True` 从 `START_DATE` 重新获取数据（全量更新）。
-        """
-        stock_list = list(self.stock_basic_col.find({}, 
-            {"code": 1, "last_daily_date": 1, "last_minute_15_date": 1, "last_minute_60_date": 1}
-        ))
-        end_date = datetime.now().strftime(DATE_FORMAT)
+    def sync_k_data(
+        self,
+        frequencies: Optional[Sequence[str]] = None,
+        full_update: bool = False,
+        lookback_years: Optional[int] = None,
+        dry_run: bool = False,
+    ) -> None:
+        """根据仓库状态同步 K 线数据：首轮按年限回溯，其后增量更新。"""
+        freq_list: Tuple[str, ...] = tuple(frequencies or self.default_frequencies)
+        lookback = lookback_years or self.history_years
+        projection = {"code": 1, "last_daily_date": 1, "last_minute_15_date": 1, "last_minute_60_date": 1}
+        stock_list = list(self.stock_basic_col.find({}, projection))
+        end_dt = datetime.now()
+        end_date_str = end_dt.strftime(DATE_FORMAT)
 
-        # 需要更新的数据类型（周期, 对应的MongoDB集合, 在 `stock_basic_col` 中的字段名）
-        data_types = [
-            # ('d', self.daily_col, "last_daily_date"),
-            # ('15', self.minute_15_col, "last_minute_15_date"),
-            ('60', self.minute_60_col, "last_minute_60_date")
-        ]
-
-        for freq, collection_name, field_name in data_types:
-            with tqdm(total=len(stock_list), desc=f"更新 {freq} 数据", unit="stock", dynamic_ncols=True) as pbar:
+        for freq in freq_list:
+            collection, field_name = self._get_collection_meta(freq)
+            desc = "同步日线" if freq == "d" else f"同步 {freq} 分钟"
+            with tqdm(total=len(stock_list), desc=desc, unit='stock', dynamic_ncols=True) as pbar:
                 for stock in stock_list:
-                    code = stock["code"]
-                    last_date = stock.get(field_name)
-                    
-                    # **全量更新（从 `START_DATE` 开始）**
-                    if full_update or not last_date:
-                        start_date_str = START_DATE
-                    else:
-                        start_dt = datetime.strptime(last_date, DATE_FORMAT) + timedelta(days=1)
-                        start_date_str = start_dt.strftime(DATE_FORMAT)
+                    code = stock['code']
+                    last_date = stock.get(field_name) or self._latest_date_in_collection(collection, code)
 
-                    # **如果 `start_date_str` 超过 `end_date`，跳过**
-                    if start_date_str > end_date:
+                    start_date_str = self._resolve_start_date(last_date, full_update, lookback, end_dt)
+                    if not start_date_str or start_date_str > end_date_str:
                         pbar.update(1)
                         continue
 
-                    # 查询数据
-                    data_list = self.query_history_k_data_plus(code, start_date_str, end_date, freq)
-                    if data_list:
-                        try:
-                            # 处理 `d` vs `15m/60m` 字段
-                            bulk_operations = [
-                                UpdateOne(
-                                    {"code": data["code"], "date": data["date"], **({"time": data["time"]} if freq != 'd' else {})},
-                                    {"$set": data},
-                                    upsert=True
-                                ) for data in data_list
-                            ]
+                    if dry_run:
+                        tqdm.write(f"[Dry Run] {code} -> {freq} {start_date_str} ~ {end_date_str}")
+                        pbar.update(1)
+                        continue
 
-                            collection_name.bulk_write(bulk_operations, ordered=False)
+                    data_list = self.query_history_k_data_plus(code, start_date_str, end_date_str, freq)
+                    if not data_list:
+                        pbar.update(1)
+                        continue
 
-                            # **更新 `stock_basic_col` 中的 `last_*_date`**
-                            new_last_date = data_list[-1]["date"]
-                            self.stock_basic_col.update_one({"code": code}, {"$set": {field_name: new_last_date}})
-
-                            # **用 tqdm.write() 避免影响进度条**
-                            tqdm.write(f"{code} 更新 {freq} 线数据 {len(data_list)} 条, 最新数据日期 {new_last_date}")
-
-                        except BulkWriteError as e:
-                            tqdm.write(f"批量写入数据库时出错: {e.details}")
+                    try:
+                        bulk_operations = [
+                            UpdateOne(
+                                {
+                                    'code': data['code'],
+                                    'date': data['date'],
+                                    **({'time': data['time']} if freq != 'd' else {}),
+                                },
+                                {'$set': data},
+                                upsert=True,
+                            )
+                            for data in data_list
+                        ]
+                        if bulk_operations:
+                            collection.bulk_write(bulk_operations, ordered=False)
+                            new_last_date = data_list[-1]['date']
+                            self.stock_basic_col.update_one(
+                                {'code': code},
+                                {'$set': {field_name: new_last_date}},
+                                upsert=True,
+                            )
+                            tqdm.write(f"{code} {freq} 数据更新 {len(data_list)} 条，最新日期 {new_last_date}")
+                    except BulkWriteError as e:
+                        tqdm.write(f"{code} {freq} 批量写入失败: {e.details}")
 
                     pbar.update(1)
+
+    def update_stock_k_data(self, full_update: bool = False) -> None:
+        """兼容旧接口，默认按照配置频率同步。"""
+        self.sync_k_data(full_update=full_update)
+
