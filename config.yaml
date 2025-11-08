@@ -13,6 +13,7 @@ baostock:
   frequencies: ["d", "60"]    # 启用的周期，支持 d/15/60
 
 # akshare 配置
+# 用于获取当日实时行情（baostock 无实时）以及财报等 baostock 不覆盖的数据
 akshare:
   db: "akshare_realtime"
   kline: "kline"
