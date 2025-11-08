@@ -1,7 +1,7 @@
 import baostock as bs
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
 from pymongo.collection import Collection
@@ -11,222 +11,294 @@ from tqdm import tqdm
 from mosquant.utils.config_loader import load_config
 
 START_DATE = "2014-01-01"
+MINUTE_START_DATE = "2019-01-02"
 ADJUSTFLAG = "3"
 DATE_FORMAT = "%Y-%m-%d"
-RETRY_LIMIT = 3  # 请求失败重试次数
+RETRY_LIMIT = 3
 DAYS_PER_YEAR = 365
+DEFAULT_INTEGRITY_WINDOWS = {
+    "d": 30,
+    "w": 400,
+    "m": 1500,
+    "15": 15,
+    "60": 45,
+}
+FINANCE_REPORTERS = {
+    "profit": bs.query_profit_data,
+    "balance": bs.query_balance_data,
+    "cash_flow": bs.query_cash_flow_data,
+    "dupont": bs.query_dupont_data,
+}
+FREQ_DESC = {
+    "d": "同步日线",
+    "w": "同步周线",
+    "m": "同步月线",
+    "15": "同步15分钟",
+    "60": "同步60分钟",
+}
+
 
 class BaostockManager:
-    def __init__(self, config_path: str = 'config.yaml'):
-        """
-        初始化BaostockManager对象。
-        
-        参数：
-        config_path: 配置文件路径
-        """
-        # 加载配置
+    """Encapsulates Baostock data synchronization against MongoDB."""
+
+    def __init__(self, config_path: str = "config.yaml"):
         self.config = load_config(config_path)
-        
-        # 初始化 MongoDB
-        baostock_cfg = self.config['baostock']
-        mongo_config = self.config['mongodb']
-        self.client = MongoClient(mongo_config['uri'])
-        self.db = self.client[baostock_cfg['db']]
-        self.stock_basic_col = self.db[baostock_cfg['basic']]
-        self.daily_col = self.db[baostock_cfg['daily']]
-        self.minute_15_col = self.db[baostock_cfg['minute_15']]
-        self.minute_60_col = self.db[baostock_cfg['minute_60']]
+
+        mongo_cfg = self.config["mongodb"]
+        baostock_cfg = self.config["baostock"]
+
+        self.client = MongoClient(mongo_cfg["uri"])
+        self.db = self.client[baostock_cfg["db"]]
+        self.stock_basic_col = self.db[baostock_cfg["basic"]]
+        self.daily_col = self.db[baostock_cfg["daily"]]
+        self.weekly_col = self.db[baostock_cfg.get("weekly", "weekly_adjusted")]
+        self.monthly_col = self.db[baostock_cfg.get("monthly", "monthly_adjusted")]
+        self.minute_15_col = self.db[baostock_cfg["minute_15"]]
+        self.minute_60_col = self.db[baostock_cfg["minute_60"]]
+        self.finance_col = self.db[baostock_cfg.get("finance_quarterly", "finance_quarterly")]
 
         self.history_years = int(baostock_cfg.get("history_years", 10))
-        self.default_frequencies: Tuple[str, ...] = tuple(baostock_cfg.get("frequencies", ["d", "60"]))
-        self.collection_meta = {
-            "d": (self.daily_col, "last_daily_date"),
-            "15": (self.minute_15_col, "last_minute_15_date"),
-            "60": (self.minute_60_col, "last_minute_60_date"),
+        self.finance_history_years = int(baostock_cfg.get("finance_history_years", 10))
+        self.minute_start_date = baostock_cfg.get("minute_start_date", MINUTE_START_DATE)
+        self.default_frequencies: Tuple[str, ...] = tuple(
+            baostock_cfg.get("frequencies", ["d", "w", "m", "15", "60"])
+        )
+        integrity_cfg = baostock_cfg.get("integrity_windows", {})
+        self.integrity_windows: Dict[str, int] = {
+            freq: int(integrity_cfg.get(freq, DEFAULT_INTEGRITY_WINDOWS.get(freq, 0)) or 0)
+            for freq in set(DEFAULT_INTEGRITY_WINDOWS) | set(integrity_cfg)
         }
 
-        # 创建索引
+        self.collection_meta: Dict[str, Dict[str, Any]] = {
+            "d": {
+                "collection": self.daily_col,
+                "field": "last_daily_date",
+                "min_start": START_DATE,
+                "default_years": self.history_years,
+            },
+            "w": {
+                "collection": self.weekly_col,
+                "field": "last_weekly_date",
+                "min_start": START_DATE,
+                "default_years": self.history_years,
+            },
+            "m": {
+                "collection": self.monthly_col,
+                "field": "last_monthly_date",
+                "min_start": START_DATE,
+                "default_years": self.history_years,
+            },
+            "15": {
+                "collection": self.minute_15_col,
+                "field": "last_minute_15_date",
+                "min_start": self.minute_start_date,
+                "default_years": None,
+            },
+            "60": {
+                "collection": self.minute_60_col,
+                "field": "last_minute_60_date",
+                "min_start": self.minute_start_date,
+                "default_years": None,
+            },
+        }
+
         self._create_indexes()
 
-        # 登录baostock
         lg = bs.login()
-        if lg.error_code != '0':
-            raise Exception(f"登录baostock失败: {lg.error_msg}")
+        if lg.error_code != "0":
+            raise RuntimeError(f"登录baostock失败: {lg.error_msg}")
         print("登录baostock成功")
 
-    def _create_indexes(self):
-        """创建MongoDB集合的索引以保证数据唯一性"""
-        # 基本信息表对code唯一索引
+    # ------------------------------------------------------------------ #
+    # Lifecycle helpers
+    # ------------------------------------------------------------------ #
+    def _create_indexes(self) -> None:
         if "code_1" not in self.stock_basic_col.index_information():
             self.stock_basic_col.create_index([("code", ASCENDING)], unique=True)
-        
-        # 日线数据表对(code, date)唯一索引
-        if "code_1_date_1" not in self.daily_col.index_information():
-            self.daily_col.create_index([("code", ASCENDING), ("date", ASCENDING)], unique=True)
-        
-        # 分钟K线数据表对(code, datetime)唯一索引
-        if "code_1_date_1_time_1" not in self.minute_15_col.index_information():
-            self.minute_15_col.create_index([("code", ASCENDING), ("date", ASCENDING),("time", ASCENDING)], unique=True)
-        if "code_1_date_1_time_1" not in self.minute_60_col.index_information():
-            self.minute_60_col.create_index([("code", ASCENDING), ("date", ASCENDING),("time", ASCENDING)], unique=True)
-        
-        return
 
-    def close(self):
+        for col in (self.daily_col, self.weekly_col, self.monthly_col):
+            if "code_1_date_1" not in col.index_information():
+                col.create_index([("code", ASCENDING), ("date", ASCENDING)], unique=True)
+
+        for col in (self.minute_15_col, self.minute_60_col):
+            if "code_1_date_1_time_1" not in col.index_information():
+                col.create_index(
+                    [("code", ASCENDING), ("date", ASCENDING), ("time", ASCENDING)],
+                    unique=True,
+                )
+
+        if "code_1_year_1_quarter_1_report_type_1" not in self.finance_col.index_information():
+            self.finance_col.create_index(
+                [
+                    ("code", ASCENDING),
+                    ("year", ASCENDING),
+                    ("quarter", ASCENDING),
+                    ("report_type", ASCENDING),
+                ],
+                unique=True,
+            )
+
+    def close(self) -> None:
         bs.logout()
         self.client.close()
         print("已登出baostock并关闭MongoDB连接")
 
-    def __enter__(self):
+    def __enter__(self) -> "BaostockManager":
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
-    
-    def query_stock_basic(self, refresh=False):
-        """
-        从baostock获取A股基本信息列表。
-        :param refresh: 是否强制刷新数据。如果为True，则删除所有数据并重新插入。
-        """
-        expected_fields = ['code', 'code_name', 'ipoDate', 'outDate', 'type', 'status']
-        rs = bs.query_stock_basic()
-        stock_list = []
 
-        # 验证字段是否匹配
+    # ------------------------------------------------------------------ #
+    # 基础信息
+    # ------------------------------------------------------------------ #
+    def query_stock_basic(self, refresh: bool = False) -> None:
+        expected_fields = ["code", "code_name", "ipoDate", "outDate", "type", "status"]
+        rs = bs.query_stock_basic()
         if rs.fields != expected_fields:
-            raise ValueError(f"query_stock_basic func: Fields do not match the expected format. Expected: {expected_fields}, but got: {rs.fields}")
-            
+            raise ValueError(
+                f"query_stock_basic字段不匹配，预期 {expected_fields}，实际 {rs.fields}"
+            )
+
+        stock_list: List[Dict[str, Any]] = []
         while rs.next():
             row = rs.get_row_data()
-            if row[5] == '1' and row[4] in ['1', '2']:  # 股票状态为上市，且 type 为 1、2、5
-                stock_info = {
-                    "code": row[0],
-                    "code_name": row[1],
-                    "ipoDate": row[2],
-                    "outDate": row[3],
-                    "type": row[4],
-                    "status": row[5]
-                }
-                stock_list.append(stock_info)
-        
+            if row[5] == "1" and row[4] in ("1", "2"):
+                stock_list.append(
+                    {
+                        "code": row[0],
+                        "code_name": row[1],
+                        "ipoDate": row[2],
+                        "outDate": row[3],
+                        "type": row[4],
+                        "status": row[5],
+                    }
+                )
+
         if refresh:
-            # 删除所有数据并重新插入
             self.stock_basic_col.delete_many({})
-            self.stock_basic_col.insert_many(stock_list)
+            if stock_list:
+                self.stock_basic_col.insert_many(stock_list)
         else:
-            # 更新数据并删除不必要的字段
             for stock in stock_list:
                 self.stock_basic_col.update_one(
                     {"code": stock["code"]},
                     {"$set": stock},
-                    upsert=True
+                    upsert=True,
                 )
-        
-        print(f"股票基本信息更新完成，共更新 {len(stock_list)} 条记录。")
+        print(f"股票基本信息更新完成，共处理 {len(stock_list)} 条记录。")
 
-    def query_history_k_data_plus(self, code, start_date, end_date, frequency='d'):
-        """
-        获取历史K线数据。
-        
-        参数:
-        - code: 股票代码
-        - start_date: 开始日期 (YYYY-MM-DD)
-        - end_date: 结束日期 (YYYY-MM-DD)
-        - frequency: K线周期 ('d' 日线, '5' 分钟线等)
-        
-        返回:
-        - data_list: 包含K线数据的列表
-        """
-        # 使用官方提供的字段名称
-        if frequency == 'd': # 日K线
-            fields = "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,psTTM,pcfNcfTTM,pbMRQ,isST"
-            expected_fields = ['date', 'code', 'open', 'high', 'low', 'close', 'preclose', 'volume', 'amount',
-                                'adjustflag', 'turn', 'tradestatus', 'pctChg', 'peTTM', 'psTTM', 'pcfNcfTTM',
-                                'pbMRQ', 'isST']
-        elif frequency == '15' or frequency == '60':  # 分钟K线
-            # 例如 '15m', '30m', '60m'
+    # ------------------------------------------------------------------ #
+    # K 线同步
+    # ------------------------------------------------------------------ #
+    def query_history_k_data_plus(
+        self,
+        code: str,
+        start_date: str,
+        end_date: str,
+        frequency: str = "d",
+    ) -> List[Dict[str, Any]]:
+        if frequency == "d":
+            fields = (
+                "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,"
+                "tradestatus,pctChg,peTTM,psTTM,pcfNcfTTM,pbMRQ,isST"
+            )
+            expected_fields = [
+                "date",
+                "code",
+                "open",
+                "high",
+                "low",
+                "close",
+                "preclose",
+                "volume",
+                "amount",
+                "adjustflag",
+                "turn",
+                "tradestatus",
+                "pctChg",
+                "peTTM",
+                "psTTM",
+                "pcfNcfTTM",
+                "pbMRQ",
+                "isST",
+            ]
+        elif frequency in ("15", "60"):
             fields = "date,time,code,open,high,low,close,volume,amount,adjustflag"
-            expected_fields = ['date', 'time', 'code', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adjustflag']
-        elif frequency == 'w' or frequency == 'm': # 周、月K线
-            fields = "date,time,code,open,high,low,close,volume,amount,adjustflag,turn,pctChg"
-            expected_fields = ['date', 'time', 'code', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adjustflag','turn','pctChg']
+            expected_fields = [
+                "date",
+                "time",
+                "code",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "adjustflag",
+            ]
+        elif frequency in ("w", "m"):
+            fields = "date,code,open,high,low,close,volume,amount,adjustflag,turn,pctChg"
+            expected_fields = [
+                "date",
+                "code",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "adjustflag",
+                "turn",
+                "pctChg",
+            ]
         else:
-            raise ValueError("Unsupported frequency. Use 'd' for daily or '1m', '5m', etc. for minute data.")
-        
+            raise ValueError("Unsupported frequency. Choose from d/w/m/15/60.")
+
         for attempt in range(RETRY_LIMIT):
             try:
                 rs = bs.query_history_k_data_plus(
-                    code, 
-                    fields, 
-                    start_date, 
+                    code,
+                    fields,
+                    start_date,
                     end_date,
-                    frequency, 
-                    adjustflag=ADJUSTFLAG
+                    frequency,
+                    adjustflag=ADJUSTFLAG,
                 )
-                if rs.error_code != '0':
-                    print(f"获取{code}k线数据失败: {rs.error_msg} (尝试 {attempt + 1}/{RETRY_LIMIT})")
+                if rs.error_code != "0":
+                    print(
+                        f"获取{code}{frequency}K线失败: {rs.error_msg} "
+                        f"(尝试 {attempt + 1}/{RETRY_LIMIT})"
+                    )
+                    time.sleep(1)
                     continue
 
                 if rs.fields != expected_fields:
-                    raise ValueError(f"字段不匹配: 期望 {expected_fields}，实际 {rs.fields}")
+                    raise ValueError(
+                        f"{code} {frequency} 字段不匹配，预期 {expected_fields}，实际 {rs.fields}"
+                    )
 
-                # 确保字段正确
-                data_list = []
+                data_list: List[Dict[str, Any]] = []
                 while rs.next():
                     row = rs.get_row_data()
-                    # 自动匹配字段，并尝试转换为 float
-                    data_dict = {}
-                    for key, value in zip(rs.fields, row):
-                        try:
-                            data_dict[key] = float(value) if value else None  # 只有非空值尝试转换
-                        except ValueError:
-                            data_dict[key] = value  # 非数值字段保留原始值
-                    data_list.append(data_dict)
+                    data_list.append(self._normalize_row(rs.fields, row))
 
-                # 按日期排序
                 data_list.sort(key=lambda x: x["date"])
                 return data_list
-            except Exception as e:
-                print(f"获取{code} {frequency}级别k线数据异常: {e} (尝试 {attempt + 1}/{RETRY_LIMIT})")
-                time.sleep(1)  # 等待后重试
-        print(f"获取{code} {frequency}级别k线数据失败，超出最大重试次数。")
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"获取{code} {frequency}级别K线异常: {exc} "
+                    f"(尝试 {attempt + 1}/{RETRY_LIMIT})"
+                )
+                time.sleep(1)
+
+        print(f"获取{code} {frequency}级别K线失败，超出最大重试次数。")
         return []
 
-    def query_all_stock(self,day:str="2024-10-25"):
-        #### 获取某日所有证券信息 ####
+    def query_all_stock(self, day: str = "2024-10-25") -> None:
         rs = bs.query_all_stock(day)
-        #TODO 保存到db
+        print(f"query_all_stock 暂未落库，返回字段: {rs.fields}")
 
-    def _get_collection_meta(self, frequency: str) -> Tuple[Collection, str]:
-        if frequency not in self.collection_meta:
-            raise ValueError(f"不支持的频率 {frequency}，允许值: {list(self.collection_meta.keys())}")
-        return self.collection_meta[frequency]
-
-    def _latest_date_in_collection(self, collection: Collection, code: str) -> Optional[str]:
-        record = collection.find_one({"code": code}, {"date": 1}, sort=[("date", DESCENDING)])
-        return record.get("date") if record else None
-
-    def _resolve_start_date(
-        self,
-        last_date: Optional[str],
-        full_update: bool,
-        lookback_years: int,
-        end_dt: datetime,
-    ) -> Optional[str]:
-        if full_update:
-            candidate = datetime.strptime(START_DATE, DATE_FORMAT)
-        elif last_date:
-            candidate = datetime.strptime(last_date, DATE_FORMAT) + timedelta(days=1)
-        else:
-            lookback_dt = end_dt - timedelta(days=lookback_years * DAYS_PER_YEAR)
-            candidate = max(datetime.strptime(START_DATE, DATE_FORMAT), lookback_dt)
-
-        if candidate > end_dt:
-            return None
-        return candidate.strftime(DATE_FORMAT)
-
-
-    #-----------------------------------------------------------------------
     def sync_k_data(
         self,
         frequencies: Optional[Sequence[str]] = None,
@@ -234,23 +306,44 @@ class BaostockManager:
         lookback_years: Optional[int] = None,
         dry_run: bool = False,
     ) -> None:
-        """根据仓库状态同步 K 线数据：首轮按年限回溯，其后增量更新。"""
-        freq_list: Tuple[str, ...] = tuple(frequencies or self.default_frequencies)
-        lookback = lookback_years or self.history_years
-        projection = {"code": 1, "last_daily_date": 1, "last_minute_15_date": 1, "last_minute_60_date": 1}
+        freq_list = tuple(frequencies or self.default_frequencies)
+        projection = {"code": 1}
+        for meta in self.collection_meta.values():
+            projection[meta["field"]] = 1
+
         stock_list = list(self.stock_basic_col.find({}, projection))
+        if not stock_list:
+            print("未找到股票基础信息，跳过K线同步。")
+            return
+
         end_dt = datetime.now()
         end_date_str = end_dt.strftime(DATE_FORMAT)
 
         for freq in freq_list:
-            collection, field_name = self._get_collection_meta(freq)
-            desc = "同步日线" if freq == "d" else f"同步 {freq} 分钟"
-            with tqdm(total=len(stock_list), desc=desc, unit='stock', dynamic_ncols=True) as pbar:
-                for stock in stock_list:
-                    code = stock['code']
-                    last_date = stock.get(field_name) or self._latest_date_in_collection(collection, code)
+            settings = self._get_collection_meta(freq)
+            collection: Collection = settings["collection"]
+            field_name: str = settings["field"]
+            min_start = settings["min_start"]
+            default_years = settings["default_years"]
+            freq_lookback = lookback_years if lookback_years is not None else default_years
 
-                    start_date_str = self._resolve_start_date(last_date, full_update, lookback, end_dt)
+            desc = FREQ_DESC.get(freq, f"同步{freq}数据")
+            with tqdm(
+                total=len(stock_list),
+                desc=desc,
+                unit="stock",
+                dynamic_ncols=True,
+            ) as pbar:
+                for stock in stock_list:
+                    code = stock["code"]
+                    last_date = stock.get(field_name) or self._latest_date_in_collection(collection, code)
+                    start_date_str = self._resolve_start_date(
+                        last_date,
+                        full_update,
+                        freq_lookback,
+                        end_dt,
+                        min_start,
+                    )
                     if not start_date_str or start_date_str > end_date_str:
                         pbar.update(1)
                         continue
@@ -260,39 +353,343 @@ class BaostockManager:
                         pbar.update(1)
                         continue
 
-                    data_list = self.query_history_k_data_plus(code, start_date_str, end_date_str, freq)
+                    data_list = self.query_history_k_data_plus(
+                        code,
+                        start_date_str,
+                        end_date_str,
+                        freq,
+                    )
                     if not data_list:
                         pbar.update(1)
                         continue
 
-                    try:
-                        bulk_operations = [
-                            UpdateOne(
-                                {
-                                    'code': data['code'],
-                                    'date': data['date'],
-                                    **({'time': data['time']} if freq != 'd' else {}),
-                                },
-                                {'$set': data},
-                                upsert=True,
-                            )
-                            for data in data_list
-                        ]
-                        if bulk_operations:
-                            collection.bulk_write(bulk_operations, ordered=False)
-                            new_last_date = data_list[-1]['date']
-                            self.stock_basic_col.update_one(
-                                {'code': code},
-                                {'$set': {field_name: new_last_date}},
-                                upsert=True,
-                            )
-                            tqdm.write(f"{code} {freq} 数据更新 {len(data_list)} 条，最新日期 {new_last_date}")
-                    except BulkWriteError as e:
-                        tqdm.write(f"{code} {freq} 批量写入失败: {e.details}")
-
+                    new_last_date = self._bulk_upsert_kline(collection, freq, data_list)
+                    if new_last_date:
+                        self.stock_basic_col.update_one(
+                            {"code": code},
+                            {"$set": {field_name: new_last_date}},
+                            upsert=True,
+                        )
+                        tqdm.write(
+                            f"{code} {freq} 数据更新 {len(data_list)} 条，最新日期 {new_last_date}"
+                        )
                     pbar.update(1)
 
     def update_stock_k_data(self, full_update: bool = False) -> None:
-        """兼容旧接口，默认按照配置频率同步。"""
         self.sync_k_data(full_update=full_update)
 
+    # ------------------------------------------------------------------ #
+    # 财务数据
+    # ------------------------------------------------------------------ #
+    def sync_finance_data(
+        self,
+        full_update: bool = False,
+        years: Optional[int] = None,
+        dry_run: bool = False,
+    ) -> None:
+        projection = {"code": 1, "last_finance_quarter": 1}
+        stock_list = list(self.stock_basic_col.find({}, projection))
+        if not stock_list:
+            print("未找到股票基础信息，跳过财务数据同步。")
+            return
+
+        end_year, end_quarter = self._current_year_quarter()
+        lookback = years or self.finance_history_years
+        min_year = end_year - lookback + 1
+
+        with tqdm(
+            total=len(stock_list),
+            desc="同步季频财务数据",
+            unit="stock",
+            dynamic_ncols=True,
+        ) as pbar:
+            for stock in stock_list:
+                code = stock["code"]
+                marker = None if full_update else stock.get("last_finance_quarter")
+                if not marker:
+                    marker = self._latest_finance_marker(code)
+
+                if marker and not full_update:
+                    start_year, start_quarter = self._next_quarter(*self._parse_quarter_marker(marker))
+                else:
+                    start_year, start_quarter = min_year, 1
+
+                if start_year < min_year:
+                    start_year = min_year
+                    start_quarter = 1
+
+                quarters = list(self._iter_finance_quarters(start_year, start_quarter, end_year, end_quarter))
+                if not quarters:
+                    pbar.update(1)
+                    continue
+
+                if dry_run:
+                    tqdm.write(
+                        f"[Dry Run] {code} -> finance {quarters[0][0]}Q{quarters[0][1]} "
+                        f"~ {quarters[-1][0]}Q{quarters[-1][1]}"
+                    )
+                    pbar.update(1)
+                    continue
+
+                latest_marker = None
+                for year, quarter in quarters:
+                    data_written = False
+                    for report_type, reporter in FINANCE_REPORTERS.items():
+                        rows = self._query_finance_dataset(reporter, code, year, quarter)
+                        if not rows:
+                            continue
+                        try:
+                            operations = []
+                            for row in rows:
+                                payload = {
+                                    **row,
+                                    "code": row.get("code", code),
+                                    "year": int(row.get("year", year)),
+                                    "quarter": int(row.get("quarter", quarter)),
+                                    "report_type": report_type,
+                                }
+                                operations.append(
+                                    UpdateOne(
+                                        {
+                                            "code": payload["code"],
+                                            "year": payload["year"],
+                                            "quarter": payload["quarter"],
+                                            "report_type": payload["report_type"],
+                                        },
+                                        {"$set": payload},
+                                        upsert=True,
+                                    )
+                                )
+                            if operations:
+                                self.finance_col.bulk_write(operations, ordered=False)
+                                data_written = True
+                        except BulkWriteError as exc:  # noqa: BLE001
+                            tqdm.write(f"{code} 财务数据写入失败: {exc.details}")
+
+                    if data_written:
+                        latest_marker = self._format_quarter_marker(year, quarter)
+
+                if latest_marker:
+                    self.stock_basic_col.update_one(
+                        {"code": code},
+                        {"$set": {"last_finance_quarter": latest_marker}},
+                    )
+                    tqdm.write(f"{code} 财务数据更新至 {latest_marker}")
+                pbar.update(1)
+
+    # ------------------------------------------------------------------ #
+    # 数据完整性巡检
+    # ------------------------------------------------------------------ #
+    def run_integrity_check(
+        self,
+        frequencies: Optional[Sequence[str]] = None,
+        window_days: Optional[Dict[str, int]] = None,
+        dry_run: bool = False,
+    ) -> None:
+        freq_list = tuple(frequencies or self.default_frequencies)
+        projection = {"code": 1}
+        for meta in self.collection_meta.values():
+            projection[meta["field"]] = 1
+        stock_list = list(self.stock_basic_col.find({}, projection))
+        if not stock_list:
+            print("未找到股票基础信息，跳过完整性校验。")
+            return
+
+        freq_windows = window_days or self.integrity_windows
+        end_dt = datetime.now()
+        end_date_str = end_dt.strftime(DATE_FORMAT)
+
+        for freq in freq_list:
+            window = int(freq_windows.get(freq, 0) or 0)
+            if window <= 0:
+                continue
+
+            settings = self._get_collection_meta(freq)
+            collection: Collection = settings["collection"]
+            min_start = datetime.strptime(settings["min_start"], DATE_FORMAT)
+            start_dt = max(min_start, end_dt - timedelta(days=window))
+            start_date_str = start_dt.strftime(DATE_FORMAT)
+
+            desc = f"校验{freq}数据"
+            with tqdm(
+                total=len(stock_list),
+                desc=desc,
+                unit="stock",
+                dynamic_ncols=True,
+            ) as pbar:
+                for stock in stock_list:
+                    code = stock["code"]
+                    if dry_run:
+                        tqdm.write(
+                            f"[Integrity Dry Run] {code} -> {freq} {start_date_str} ~ {end_date_str}"
+                        )
+                        pbar.update(1)
+                        continue
+
+                    data_list = self.query_history_k_data_plus(
+                        code,
+                        start_date_str,
+                        end_date_str,
+                        freq,
+                    )
+                    if not data_list:
+                        pbar.update(1)
+                        continue
+
+                    new_last_date = self._bulk_upsert_kline(collection, freq, data_list)
+                    if new_last_date:
+                        field_name = settings["field"]
+                        self.stock_basic_col.update_one(
+                            {"code": code},
+                            {"$set": {field_name: new_last_date}},
+                            upsert=True,
+                        )
+                    pbar.update(1)
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
+    def _get_collection_meta(self, frequency: str) -> Dict[str, Any]:
+        if frequency not in self.collection_meta:
+            raise ValueError(f"不支持的频率 {frequency}，允许 {list(self.collection_meta.keys())}")
+        return self.collection_meta[frequency]
+
+    def _latest_date_in_collection(self, collection: Collection, code: str) -> Optional[str]:
+        record = collection.find_one({"code": code}, {"date": 1}, sort=[("date", DESCENDING)])
+        return record["date"] if record else None
+
+    def _resolve_start_date(
+        self,
+        last_date: Optional[str],
+        full_update: bool,
+        lookback_years: Optional[int],
+        end_dt: datetime,
+        min_start_date: str,
+    ) -> Optional[str]:
+        min_start_dt = datetime.strptime(min_start_date, DATE_FORMAT)
+        if full_update:
+            candidate = min_start_dt
+        elif last_date:
+            candidate = datetime.strptime(last_date, DATE_FORMAT) + timedelta(days=1)
+        elif lookback_years:
+            lookback_dt = end_dt - timedelta(days=lookback_years * DAYS_PER_YEAR)
+            candidate = max(min_start_dt, lookback_dt)
+        else:
+            candidate = min_start_dt
+
+        if candidate > end_dt:
+            return None
+        return candidate.strftime(DATE_FORMAT)
+
+    def _normalize_row(self, fields: Sequence[str], row: Sequence[str]) -> Dict[str, Any]:
+        data: Dict[str, Any] = {}
+        for key, value in zip(fields, row):
+            if value in ("", None):
+                data[key] = None
+                continue
+            try:
+                data[key] = float(value)
+            except ValueError:
+                data[key] = value
+        return data
+
+    def _bulk_upsert_kline(
+        self,
+        collection: Collection,
+        frequency: str,
+        data_list: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        try:
+            operations: List[UpdateOne] = []
+            for data in data_list:
+                filter_doc = {
+                    "code": data["code"],
+                    "date": data["date"],
+                }
+                if "time" in data and data["time"]:
+                    filter_doc["time"] = data["time"]
+                operations.append(
+                    UpdateOne(
+                        filter_doc,
+                        {"$set": data},
+                        upsert=True,
+                    )
+                )
+            if operations:
+                collection.bulk_write(operations, ordered=False)
+                return data_list[-1]["date"]
+        except BulkWriteError as exc:  # noqa: BLE001
+            tqdm.write(f"{data_list[0].get('code')} {frequency} 批量写入失败: {exc.details}")
+        return None
+
+    def _current_year_quarter(self) -> Tuple[int, int]:
+        now = datetime.now()
+        quarter = (now.month - 1) // 3 + 1
+        return now.year, quarter
+
+    def _format_quarter_marker(self, year: int, quarter: int) -> str:
+        return f"{year}Q{quarter}"
+
+    def _parse_quarter_marker(self, marker: str) -> Tuple[int, int]:
+        year_str, quarter_str = marker.split("Q")
+        return int(year_str), int(quarter_str)
+
+    def _next_quarter(self, year: int, quarter: int) -> Tuple[int, int]:
+        if quarter == 4:
+            return year + 1, 1
+        return year, quarter + 1
+
+    def _iter_finance_quarters(
+        self,
+        start_year: int,
+        start_quarter: int,
+        end_year: int,
+        end_quarter: int,
+    ) -> Iterator[Tuple[int, int]]:
+        year, quarter = start_year, start_quarter
+        while (year < end_year) or (year == end_year and quarter <= end_quarter):
+            yield year, quarter
+            year, quarter = self._next_quarter(year, quarter)
+
+    def _latest_finance_marker(self, code: str) -> Optional[str]:
+        record = self.finance_col.find_one(
+            {"code": code},
+            {"year": 1, "quarter": 1},
+            sort=[("year", DESCENDING), ("quarter", DESCENDING)],
+        )
+        if record:
+            return self._format_quarter_marker(int(record["year"]), int(record["quarter"]))
+        return None
+
+    def _query_finance_dataset(
+        self,
+        reporter,
+        code: str,
+        year: int,
+        quarter: int,
+    ) -> List[Dict[str, Any]]:
+        for attempt in range(RETRY_LIMIT):
+            try:
+                rs = reporter(code=code, year=year, quarter=quarter)
+                if rs.error_code != "0":
+                    print(
+                        f"获取{code} {year}Q{quarter} 财务数据失败: {rs.error_msg} "
+                        f"(尝试 {attempt + 1}/{RETRY_LIMIT})"
+                    )
+                    time.sleep(1)
+                    continue
+
+                rows: List[Dict[str, Any]] = []
+                while rs.next():
+                    row = rs.get_row_data()
+                    rows.append(self._normalize_row(rs.fields, row))
+                return rows
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"获取{code} {year}Q{quarter} 财务数据异常: {exc} "
+                    f"(尝试 {attempt + 1}/{RETRY_LIMIT})"
+                )
+                time.sleep(1)
+
+        print(f"获取{code} {year}Q{quarter} 财务数据失败，超出最大重试次数。")
+        return []

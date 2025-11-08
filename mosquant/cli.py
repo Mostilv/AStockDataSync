@@ -22,6 +22,11 @@ def handle_baostock(args: argparse.Namespace) -> None:
                 full_update=args.full,
                 lookback_years=args.years,
             )
+        elif args.action == "finance":
+            manager.sync_finance_data(
+                full_update=args.full,
+                years=args.years,
+            )
         else:
             raise ValueError(f"Unsupported Baostock action: {args.action}")
     finally:
@@ -91,8 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     baostock_parser = subparsers.add_parser("baostock", help="Tasks for Baostock data")
     baostock_parser.add_argument(
         "action",
-        choices=["basic", "kline"],
-        help="basic: refresh stock basics; kline: update K-line collections",
+        choices=["basic", "kline", "finance"],
+        help="basic: refresh stock basics; kline: update K-line collections; finance: quarterly financials",
     )
     baostock_parser.add_argument(
         "--refresh",
@@ -108,14 +113,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--freq",
         dest="frequencies",
         action="append",
-        choices=["d", "15", "60"],
+        choices=["d", "w", "m", "15", "60"],
         help="Specify frequencies (repeatable). Defaults to config frequencies.",
     )
     baostock_parser.add_argument(
         "--years",
         type=int,
         default=None,
-        help="Custom lookback window when collection is empty. Default: config history_years.",
+        help="Custom lookback window for kline/finance operations. Default: config settings.",
     )
     baostock_parser.set_defaults(handler=handle_baostock)
 

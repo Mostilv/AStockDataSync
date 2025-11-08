@@ -1,31 +1,31 @@
 # mosQuant 数据维护指南
 
-面向 MongoDB 的 A 股行情维护工具，历史数据由 **baostock** 负责，实时补齐由 **akshare** 提供；tushare 相关代码依旧保留，但在当前环境中默认不触发（没有 tushare Pro 令牌时可以忽略）。项目重构为 `mosquant/` 包，可通过 CLI 或独立脚本统一操作。
+mosQuant 面向 MongoDB 的 A 股行情/财务数据维护工具。历史数据由 **baostock** 负责，盘中/收盘补齐由 **akshare** 提供；`tushare` 相关代码仍保留（未来可继续拓展），但当前默认不启用。项目已重构为 `mosquant/` 包，可通过 CLI 或脚本方式统一操作。
 
 ## 核心功能
+
 - **BaostockManager (`mosquant.data.manager_baostock`)**
-  - 登录/登出生命周期管理，统一读取 `config.yaml`。
-  - `sync_k_data` 会先检查 MongoDB 是否已有该标的的数据：  
-    - 无记录 → 按配置的 `history_years`（默认 10 年）回溯，确保首批数据覆盖最近 N 年。  
-    - 已有记录 → 依据每个标的的最新日期增量拉取，落库后写回 `last_*_date` 标记，保证逐标的完整性。
-  - 支持日线、15 分钟、60 分钟等多个周期（可在配置或命令行指定）。
+  - 统一管理登录/登出，按 `config.yaml` 建立 MongoDB 连接与集合索引。
+  - `sync_k_data` 覆盖日/周/月/15m/60m。15/60 分钟线固定自 2019-01-02 起取数，日/周/月默认回溯 10 年（可通过 CLI 或配置覆盖）。
+  - `sync_finance_data` 自动拉取 baostock 提供的季频资产负债/利润/现金流/杜邦指标，并维持最近 10 年窗口。
+  - 新增 `run_integrity_check`，每周末自动重拉近窗数据，补齐可能的缺口。
 - **AkshareRealtimeManager (`mosquant.data.manager_akshare`)**
-  - 基于 `stock_zh_a_spot_em` 获取实时快照，并可按配置的股票列表（默认为 `stock_basic` 中所有代码）合成 15m/60m K 线。
-  - 每次运行可选择“只拉一次并强制刷新当前 bar”或“持续轮询”，适合在每日收市后补齐当日数据。
-- **每日手动脚本 `daily_update.py`**
-  - 一条命令串起 Baostock 历史维护与 Akshare 实时补齐，满足“每天手动执行一次”的需求。
-  - 提供 `--dry-run`、`--skip-akshare` 等开关，方便测试/调优。
+  - 基于 `stock_zh_a_spot_em` 获取实时快照，并可按配置股票集合合成 15m/60m K 线。
+  - 支持单次补齐或循环模式，可在盘后强制落库当前 bar。
+- **每日维护脚本 `daily_update.py`**
+  - 串联 baostock K 线、季频财务、周末完整性校验与 akshare 快照。
+  - 提供 `--dry-run`、`--skip-finance`、`--force-integrity`、`--skip-akshare` 等开关，方便排查与定制。
 - **CLI `python main.py`**
-  - `baostock` 子命令支持 `basic`、`kline`。`kline` 已加入 `--freq/--years` 控制。
-  - 新增 `akshare` 子命令，可在 CLI 里直接触发一次性/循环式实时采集。
-  - `tushare` 子命令仍在（兼容未来需求），但默认不执行。
+  - `baostock` 子命令覆盖 `basic`（基础信息）、`kline`（多周期 K 线）、`finance`（季频财务）。
+  - `akshare` 子命令支持 `once`、`realtime`；`tushare` 子命令保留以便未来扩展。
 
 ## 安装与配置
+
 ```bash
 pip install -r requirements.txt
 ```
 
-`config.yaml` 示例（可按需修改库名/集合/年限等）：
+`config.yaml` 示例（可按需调整库名/集合/窗口）：
 
 ```yaml
 mongodb:
@@ -35,62 +35,83 @@ baostock:
   db: "baostock"
   basic: "stock_basic"
   daily: "daily_adjusted"
+  weekly: "weekly_adjusted"
+  monthly: "monthly_adjusted"
   minute_15: "minute_15_adjusted"
   minute_60: "minute_60_adjusted"
-  history_years: 10            # 仓库无数据时回溯 N 年
-  frequencies: ["d", "60"]     # 默认同步的周期，可改为 ["d", "15", "60"]
+  finance_quarterly: "finance_quarterly"
+  history_years: 10             # 日/周/月默认回溯年限
+  finance_history_years: 10     # 季频财务回溯年限
+  minute_start_date: "2019-01-02"
+  frequencies: ["d", "w", "m", "15", "60"]
+  integrity_windows:
+    d: 30
+    w: 400
+    m: 1500
+    "15": 15
+    "60": 45
 
 akshare:
   db: "akshare_realtime"
   kline: "kline"
   daily: "daily"
-  symbols: []                  # 留空时自动读取 stock_basic 中的 code
+  symbols: []                 # 留空时自动读取 stock_basic 中的 code
   timeframes: ["15m", "60m"]
   sleep_seconds: 5
 ```
 
-## 数据获取流程
-1. **首次执行**  
+## 数据维护流程
+
+1. **首次运行**
    ```bash
-   python daily_update.py --refresh-basic
-   ```  
-   - 若 Mongo 中没有任何 K 线记录，将自动从 `history_years` 指定的窗口回溯（默认 10 年）。  
-   - 同步结束后会写入 `last_daily_date` 等标记，为后续增量做准备。
-2. **日常维护**  
+   python daily_update.py --refresh-basic --full
+   ```
+   - `sync_k_data` 会按配置周期自动建库：日/周/月拉取最近 10 年，15m/60m 自 2019-01-02 起拉取。
+   - `sync_finance_data` 覆盖最近 10 年季度财务；完成后会将 `last_*` 标记写回 `stock_basic`。
+
+2. **日常维护（工作日）**
    ```bash
    python daily_update.py
-   ```  
-   - Baostock 只更新上次日期之后的增量。  
-   - Akshare 默认在当前时间窗口抓一次实时快照，并强制写入当天 bar，方便在盘后补齐。
-3. **需要测试而不触发外部接口时**  
+   ```
+   - Baostock 仅增量更新：根据每个标的的 `last_*` 日期补齐最新可得数据。
+   - Akshare 默认拉一次快照并强制刷新当前 bar，可在盘后补齐当日缺失。
+
+3. **周末校验**
+   - `daily_update.py` 会在周末自动触发 `run_integrity_check`，按照配置窗口重拉近段数据并查漏补缺。
+   - 可用 `--force-integrity` 在任意日期手动触发，或用 `--skip-integrity-check` 跳过。
+
+4. **干跑验证**
    ```bash
    python daily_update.py --dry-run
    ```
+   - 仅打印计划，不会真正登录 baostock/akshare。
 
 ## CLI 常用命令
+
 ```bash
-# 1) Baostock
-python main.py baostock basic --refresh                 # 刷新股票列表
-python main.py baostock kline --freq d --freq 60        # 同步日线+60分钟，增量模式
-python main.py baostock kline --full --years 15         # 直接回补 15 年，忽略历史标记
+# Baostock
+python main.py baostock basic --refresh
+python main.py baostock kline --freq d --freq w --freq 60
+python main.py baostock kline --full --years 15            # 指定自定义窗口
+python main.py baostock finance --years 8                  # 季频财务回补最近 8 年
 
-# 2) Akshare
-python main.py akshare once --ignore-hours --force-flush   # 在任意时间拉一次并落库
-python main.py akshare realtime --iterations 5             # 调试时循环 5 次后退出
+# Akshare
+python main.py akshare once --ignore-hours --force-flush
+python main.py akshare realtime --iterations 5
 
-# 3) Tushare（能力保留，如未来拿到 token 可直接使用）
+# Tushare（如获得 token 可启用）
 python main.py tushare basic
 ```
 
 ## 项目结构
+
 ```
 .
 |-- config.yaml
-|-- daily_update.py           # 每日维护脚本（串联 Baostock + Akshare）
+|-- daily_update.py           # 每日维护脚本（Baostock + integrity + Akshare）
 |-- main.py                   # CLI 入口
 |-- requirements.txt
 |-- mosquant/
-|   |-- __init__.py
 |   |-- cli.py
 |   |-- data/
 |   |   |-- manager_akshare.py
@@ -103,12 +124,13 @@ python main.py tushare basic
 `-- test*.py
 ```
 
-## 测试与排障
-- **干跑验证**：`python daily_update.py --dry-run` 会打印计划步骤，不会登录 baostock 或请求 akshare，可安全地在无网络/无账号场景下检查参数。
+## 测试与排查
+
+- **干跑模式**：`python daily_update.py --dry-run`，快速验证参数组合。
 - **接口健康检查**：
-  1. `python main.py baostock --help` / `python main.py akshare --help` 确认 CLI 参数无误。
-  2. `python main.py akshare once --ignore-hours --force-flush`（需要网络）可验证 akshare 接口和 Mongo 写入是否正常。
+  1. `python main.py baostock --help` / `python main.py akshare --help` 查看 CLI 配置。
+  2. `python main.py akshare once --ignore-hours --force-flush`（需网络）验证 akshare 接口与 Mongo 写入。
 - **常见问题**：
-  - 如果 `symbols` 为空，请确认 `stock_basic` 已拉取或在 `config.yaml` 中手动填入需要的代码列表。
-  - 当天尚未开市、或在休市时间执行，可以加上 `--ignore-hours` 以跳过交易时间判断。
-  - Tushare 未配置 token 时不要运行相关命令；需要时在 `config.yaml` 增加 `tushare` 节并填入 `token`。
+  - `symbols` 为空时，请确认已通过 `baostock basic` 拉取股票列表，或在配置中手动填写。
+  - 盘中/盘外执行可利用 `--ignore-hours` 跳过交易时间判断。
+  - 若需要启用 tushare，请在 `config.yaml` 中补充 `tushare.token` 并在 CLI 中使用相应子命令。
