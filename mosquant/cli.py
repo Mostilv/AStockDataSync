@@ -82,7 +82,7 @@ def handle_akshare(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Data maintenance utilities for mosQuant (Baostock/Tushare)."
+        description="Data maintenance utilities for AStockDataSync (Baostock/Tushare)."
     )
     parser.add_argument(
         "--config",

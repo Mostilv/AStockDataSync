@@ -1,6 +1,6 @@
-# mosQuant 数据维护指南
+# AStockDataSync 数据维护指南
 
-mosQuant 面向 MongoDB 的 A 股行情/财务数据维护工具。历史数据由 **baostock** 负责，盘中/收盘补齐由 **akshare** 提供；`tushare` 相关代码仍保留（未来可继续拓展），但当前默认不启用。项目已重构为 `mosquant/` 包，可通过 CLI 或脚本方式统一操作。
+AStockDataSync 面向 MongoDB 的 A 股行情/财务数据维护工具，定位为“从网络接口获取 A 股数据并落地本地存储”的统一入口。历史数据由 **baostock** 负责，盘中/收盘补齐由 **akshare** 提供；`tushare` 相关代码仍保留（未来可继续拓展），但当前默认不启用。项目已重构为 `mosquant/` 包，可通过 CLI 或脚本方式统一操作。
 
 ## 核心功能
 
