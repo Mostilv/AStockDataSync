@@ -119,9 +119,7 @@ python main.py tushare basic
 |   |   `-- manager_tushare.py
 |   `-- utils/
 |       |-- config_loader.py
-|       |-- helper.py
 |       `-- logger.py
-`-- test*.py
 ```
 
 ## 测试与排查
