@@ -9,6 +9,7 @@ AStockDataSync 面向 MongoDB 的 A 股行情/财务数据维护工具，定位�
   - `sync_k_data` 覆盖日/周/月/15m/60m。15/60 分钟线固定自 2019-01-02 起取数，日/周/月默认回溯 10 年（可通过 CLI 或配置覆盖）。
   - `sync_finance_data` 自动拉取 baostock 提供的季频资产负债/利润/现金流/杜邦指标，并维持最近 10 年窗口。
   - 新增 `run_integrity_check`，每周末自动重拉近窗数据，补齐可能的缺口。
+  - 内置 Baostock 日调用计数器，默认每日最多 15 万次请求，超限立即终止以保护账号。
 - **AkshareRealtimeManager (`mosquant.data.manager_akshare`)**
   - 基于 `stock_zh_a_spot_em` 获取实时快照，并可按配置股票集合合成 15m/60m K 线。
   - 支持单次补齐或循环模式，可在盘后强制落库当前 bar。
@@ -42,6 +43,7 @@ baostock:
   finance_quarterly: "finance_quarterly"
   history_years: 10             # 日/周/月默认回溯年限
   finance_history_years: 10     # 季频财务回溯年限
+  daily_call_limit: 150000      # Baostock 接口每日调用保护上限
   minute_start_date: "2019-01-02"
   frequencies: ["d", "w", "m", "15", "60"]
   integrity_windows:
@@ -68,6 +70,7 @@ akshare:
    ```
    - `sync_k_data` 会按配置周期自动建库：日/周/月拉取最近 10 年，15m/60m 自 2019-01-02 起拉取。
    - `sync_finance_data` 覆盖最近 10 年季度财务；完成后会将 `last_*` 标记写回 `stock_basic`。
+   - 初始化若被中断，可追加 `--resume`，系统会读取数据库里已存在的最新日期/季度，从该进度继续补齐。
 
 2. **日常维护（工作日）**
    ```bash
@@ -93,6 +96,7 @@ akshare:
 python main.py baostock basic --refresh
 python main.py baostock kline --freq d --freq w --freq 60
 python main.py baostock kline --full --years 15            # 指定自定义窗口
+python main.py baostock kline --full --resume              # 初始化断点续传
 python main.py baostock finance --years 8                  # 季频财务回补最近 8 年
 
 # Akshare

@@ -1,6 +1,8 @@
+import json
 import baostock as bs
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
@@ -23,6 +25,8 @@ DEFAULT_INTEGRITY_WINDOWS = {
     "15": 15,
     "60": 45,
 }
+DEFAULT_DAILY_CALL_LIMIT = 150_000
+DEFAULT_CALL_TRACKER_PATH = Path.home() / ".astock_baostock_calls.json"
 FINANCE_REPORTERS = {
     "profit": bs.query_profit_data,
     "balance": bs.query_balance_data,
@@ -36,6 +40,57 @@ FREQ_DESC = {
     "15": "同步15分钟",
     "60": "同步60分钟",
 }
+
+
+class DailyRateLimiter:
+    """Persists Baostock API usage per calendar day to enforce a hard cap."""
+
+    def __init__(self, limit: int = DEFAULT_DAILY_CALL_LIMIT, cache_path: Optional[str] = None) -> None:
+        self.limit = max(0, int(limit or DEFAULT_DAILY_CALL_LIMIT))
+        if cache_path:
+            self.cache_path = Path(cache_path).expanduser().resolve()
+        else:
+            self.cache_path = DEFAULT_CALL_TRACKER_PATH
+        self.current_date = datetime.now().strftime(DATE_FORMAT)
+        self.count = 0
+        self._load_state()
+
+    def _load_state(self) -> None:
+        try:
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            if data.get("date") == self.current_date:
+                self.count = int(data.get("count", 0))
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, OSError, ValueError):
+            # Bad cache files are treated as zero usage
+            self.count = 0
+
+    def _persist(self) -> None:
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_path.write_text(
+                json.dumps({"date": self.current_date, "count": self.count}),
+                encoding="utf-8",
+            )
+        except OSError:
+            # Unable to persist shouldn't break synchronization, but limit is still enforced in-memory
+            pass
+
+    def consume(self, cost: int = 1) -> None:
+        if cost <= 0 or self.limit <= 0:
+            return
+        today = datetime.now().strftime(DATE_FORMAT)
+        if today != self.current_date:
+            self.current_date = today
+            self.count = 0
+        if self.count + cost > self.limit:
+            raise RuntimeError(
+                f"Baostock API 调用已达 {self.count} 次，超过每日上限 {self.limit}，"
+                "请减少任务量或等待次日再继续。"
+            )
+        self.count += cost
+        self._persist()
 
 
 class BaostockManager:
@@ -68,6 +123,9 @@ class BaostockManager:
             freq: int(integrity_cfg.get(freq, DEFAULT_INTEGRITY_WINDOWS.get(freq, 0)) or 0)
             for freq in set(DEFAULT_INTEGRITY_WINDOWS) | set(integrity_cfg)
         }
+        daily_limit = int(baostock_cfg.get("daily_call_limit", DEFAULT_DAILY_CALL_LIMIT))
+        tracker_path = baostock_cfg.get("call_tracker_path")
+        self.rate_limiter = DailyRateLimiter(limit=daily_limit, cache_path=tracker_path)
 
         self.collection_meta: Dict[str, Dict[str, Any]] = {
             "d": {
@@ -154,6 +212,7 @@ class BaostockManager:
     # ------------------------------------------------------------------ #
     def query_stock_basic(self, refresh: bool = False) -> None:
         expected_fields = ["code", "code_name", "ipoDate", "outDate", "type", "status"]
+        self.rate_limiter.consume()
         rs = bs.query_stock_basic()
         if rs.fields != expected_fields:
             raise ValueError(
@@ -257,6 +316,7 @@ class BaostockManager:
 
         for attempt in range(RETRY_LIMIT):
             try:
+                self.rate_limiter.consume()
                 rs = bs.query_history_k_data_plus(
                     code,
                     fields,
@@ -296,6 +356,7 @@ class BaostockManager:
         return []
 
     def query_all_stock(self, day: str = "2024-10-25") -> None:
+        self.rate_limiter.consume()
         rs = bs.query_all_stock(day)
         print(f"query_all_stock 暂未落库，返回字段: {rs.fields}")
 
@@ -305,6 +366,7 @@ class BaostockManager:
         full_update: bool = False,
         lookback_years: Optional[int] = None,
         dry_run: bool = False,
+        resume: bool = False,
     ) -> None:
         freq_list = tuple(frequencies or self.default_frequencies)
         projection = {"code": 1}
@@ -343,6 +405,7 @@ class BaostockManager:
                         freq_lookback,
                         end_dt,
                         min_start,
+                        resume_from_existing=resume,
                     )
                     if not start_date_str or start_date_str > end_date_str:
                         pbar.update(1)
@@ -386,6 +449,7 @@ class BaostockManager:
         full_update: bool = False,
         years: Optional[int] = None,
         dry_run: bool = False,
+        resume: bool = False,
     ) -> None:
         projection = {"code": 1, "last_finance_quarter": 1}
         stock_list = list(self.stock_basic_col.find({}, projection))
@@ -405,11 +469,12 @@ class BaostockManager:
         ) as pbar:
             for stock in stock_list:
                 code = stock["code"]
-                marker = None if full_update else stock.get("last_finance_quarter")
+                marker = stock.get("last_finance_quarter")
                 if not marker:
                     marker = self._latest_finance_marker(code)
 
-                if marker and not full_update:
+                use_marker = bool(marker) and (resume or not full_update)
+                if use_marker and marker:
                     start_year, start_quarter = self._next_quarter(*self._parse_quarter_marker(marker))
                 else:
                     start_year, start_quarter = min_year, 1
@@ -565,12 +630,13 @@ class BaostockManager:
         lookback_years: Optional[int],
         end_dt: datetime,
         min_start_date: str,
+        resume_from_existing: bool = False,
     ) -> Optional[str]:
         min_start_dt = datetime.strptime(min_start_date, DATE_FORMAT)
-        if full_update:
-            candidate = min_start_dt
-        elif last_date:
+        if last_date and (resume_from_existing or not full_update):
             candidate = datetime.strptime(last_date, DATE_FORMAT) + timedelta(days=1)
+        elif full_update:
+            candidate = min_start_dt
         elif lookback_years:
             lookback_dt = end_dt - timedelta(days=lookback_years * DAYS_PER_YEAR)
             candidate = max(min_start_dt, lookback_dt)
@@ -670,6 +736,7 @@ class BaostockManager:
     ) -> List[Dict[str, Any]]:
         for attempt in range(RETRY_LIMIT):
             try:
+                self.rate_limiter.consume()
                 rs = reporter(code=code, year=year, quarter=quarter)
                 if rs.error_code != "0":
                     print(

@@ -14,6 +14,7 @@ baostock:
   finance_quarterly: "finance_quarterly"
   history_years: 10             # 日/周/月默认回溯年限
   finance_history_years: 10     # 季频财务回溯年限
+  daily_call_limit: 150000      # Baostock 每日调用上限
   minute_start_date: "2019-01-02"
   frequencies: ["d", "w", "m", "15", "60"]
   integrity_windows:

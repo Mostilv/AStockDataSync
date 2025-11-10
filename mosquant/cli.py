@@ -21,11 +21,13 @@ def handle_baostock(args: argparse.Namespace) -> None:
                 frequencies=args.frequencies,
                 full_update=args.full,
                 lookback_years=args.years,
+                resume=args.resume,
             )
         elif args.action == "finance":
             manager.sync_finance_data(
                 full_update=args.full,
                 years=args.years,
+                resume=args.resume,
             )
         else:
             raise ValueError(f"Unsupported Baostock action: {args.action}")
@@ -108,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--full",
         action="store_true",
         help="When used with 'kline', fetch data from START_DATE instead of last record.",
+    )
+    baostock_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="When initialization stops midway, continue from the last stored progress.",
     )
     baostock_parser.add_argument(
         "--freq",

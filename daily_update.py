@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
         help="强制从配置的起始日期全量回补，无视 last_* 标记。",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="初始化中断后，根据数据库已有进度继续回补。",
+    )
+    parser.add_argument(
         "--refresh-basic",
         action="store_true",
         help="同步前刷新股票基本信息。",
@@ -92,6 +97,7 @@ def run_baostock(
     frequencies: List[str],
     years: Optional[int],
     full_update: bool,
+    resume: bool,
     refresh_basic: bool,
     include_finance: bool,
     finance_years: Optional[int],
@@ -104,11 +110,13 @@ def run_baostock(
             frequencies=frequencies,
             lookback_years=years,
             full_update=full_update,
+            resume=resume,
         )
         if include_finance:
             manager.sync_finance_data(
                 full_update=full_update,
                 years=finance_years,
+                resume=resume,
             )
         if run_integrity:
             manager.run_integrity_check()
@@ -136,6 +144,7 @@ def main() -> None:
     if args.dry_run:
         print(
             f"[Dry Run] config={args.config}, freq={args.frequencies}, full={args.full}, "
+            f"resume={args.resume}, "
             f"kline_years={args.years}, finance={not args.skip_finance} "
             f"(years={args.finance_years}), integrity={should_integrity}; "
             f"Akshare loop={args.akshare_loop}, iterations={args.iterations}, "
@@ -148,6 +157,7 @@ def main() -> None:
         frequencies=args.frequencies,
         years=args.years,
         full_update=args.full,
+        resume=args.resume,
         refresh_basic=args.refresh_basic,
         include_finance=not args.skip_finance,
         finance_years=args.finance_years,
