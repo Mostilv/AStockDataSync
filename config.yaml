@@ -33,3 +33,18 @@ akshare:
   symbols: []                 # 留空时自动读取 baostock.basic 中的 code
   timeframes: ["15m", "60m"]  # 需要合成的周期
   sleep_seconds: 5            # 实时循环模式的轮询间隔
+
+# stock_middle_platform_backend 配置
+stock_middle_platform_backend:
+  base_url: "http://localhost:8000/api"
+  login_path: "/auth/login"
+  basic_path: "/stocks/basic"
+  kline_path: "/stocks/kline"
+  username: "please-set-me"
+  password: "please-set-me"
+  verify_ssl: true
+  timeout: 10
+  batch_size: 500
+  token_field: "token"
+  token_prefix: "Bearer"
+  token_header: "Authorization"

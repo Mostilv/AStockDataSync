@@ -10,7 +10,7 @@ from pymongo.collection import Collection
 from pymongo.errors import BulkWriteError
 from tqdm import tqdm
 
-from mosquant.utils.config_loader import load_config
+from ..utils.config_loader import load_config
 
 START_DATE = "2014-01-01"
 MINUTE_START_DATE = "2019-01-02"

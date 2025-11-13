@@ -6,7 +6,7 @@ import tushare as ts
 import pandas as pd
 import threading
 
-from mosquant.utils.config_loader import load_config
+from ..utils.config_loader import load_config
 
 class TushareManager:
     """ TODO 

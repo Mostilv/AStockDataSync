@@ -5,9 +5,10 @@ from typing import Callable
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-from mosquant.data.manager_akshare import AkshareRealtimeManager
-from mosquant.data.manager_baostock import BaostockManager
-from mosquant.data.manager_tushare import TushareManager
+from .data.manager_akshare import AkshareRealtimeManager
+from .data.manager_backend import StockMiddlePlatformBackendSync
+from .data.manager_baostock import BaostockManager
+from .data.manager_tushare import TushareManager
 
 
 def handle_baostock(args: argparse.Namespace) -> None:
@@ -78,6 +79,31 @@ def handle_akshare(args: argparse.Namespace) -> None:
             )
         else:
             raise ValueError(f"Unsupported Akshare action: {args.action}")
+    finally:
+        manager.close()
+
+
+def handle_backend(args: argparse.Namespace) -> None:
+    """Send MongoDB data to stock_middle_platform_backend."""
+    manager = StockMiddlePlatformBackendSync(config_path=args.config)
+    try:
+        if args.action == "basic":
+            total = manager.push_stock_basic(
+                batch_size=args.batch_size,
+                limit=args.limit,
+            )
+            print(f"已推送 {total} 条股票基本信息。")
+        elif args.action == "kline":
+            total = manager.push_kline(
+                frequency=args.frequency,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                batch_size=args.batch_size,
+                limit=args.limit,
+            )
+            print(f"已推送 {total} 条 {args.frequency} 级别K线数据。")
+        else:
+            raise ValueError(f"Unsupported backend action: {args.action}")
     finally:
         manager.close()
 
@@ -189,6 +215,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit realtime loop iterations (default: infinite).",
     )
     akshare_parser.set_defaults(handler=handle_akshare)
+
+    # Backend commands
+    backend_parser = subparsers.add_parser(
+        "backend",
+        help="Push MongoDB data to stock_middle_platform_backend.",
+    )
+    backend_parser.add_argument(
+        "action",
+        choices=["basic", "kline"],
+        help="basic: 推送股票基础列表; kline: 推送指定频率的历史K线。",
+    )
+    backend_parser.add_argument(
+        "--frequency",
+        default="d",
+        choices=["d", "w", "m", "15", "60"],
+        help="K线同步频率，仅 action=kline 时有效 (默认: d)。",
+    )
+    backend_parser.add_argument(
+        "--start-date",
+        default=None,
+        help="K线起始日期 (YYYY-MM-DD 或 YYYYMMDD)。",
+    )
+    backend_parser.add_argument(
+        "--end-date",
+        default=None,
+        help="K线结束日期 (YYYY-MM-DD 或 YYYYMMDD)。",
+    )
+    backend_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="单批推送条数，默认读取配置。",
+    )
+    backend_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="限制推送的最大条数，用于调试。",
+    )
+    backend_parser.set_defaults(handler=handle_backend)
 
     return parser
 

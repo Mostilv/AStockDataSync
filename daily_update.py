@@ -2,8 +2,8 @@ import argparse
 from datetime import datetime
 from typing import List, Optional
 
-from mosquant.data.manager_akshare import AkshareRealtimeManager
-from mosquant.data.manager_baostock import BaostockManager
+from src.data.manager_akshare import AkshareRealtimeManager
+from src.data.manager_baostock import BaostockManager
 
 
 def parse_args() -> argparse.Namespace:

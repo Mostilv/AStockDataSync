@@ -8,7 +8,7 @@ import pandas as pd
 import pytz
 from pymongo import ASCENDING, MongoClient, errors
 
-from mosquant.utils.config_loader import load_config
+from ..utils.config_loader import load_config
 
 BEIJING_TZ = pytz.timezone("Asia/Shanghai")
 TRADING_DAYS = {0, 1, 2, 3, 4}
