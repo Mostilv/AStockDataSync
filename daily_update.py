@@ -43,9 +43,17 @@ def parse_args() -> argparse.Namespace:
         help="同步前刷新股票基本信息。",
     )
     parser.add_argument(
-        "--skip-finance",
+        "--include-finance",
+        dest="include_finance",
         action="store_true",
-        help="跳过季频财务数据同步。",
+        default=False,
+        help="显式开启季频财务数据同步（默认关闭）",
+    )
+    parser.add_argument(
+        "--skip-finance",
+        dest="include_finance",
+        action="store_false",
+        help="跳过季频财务数据同步（默认即跳过）",
     )
     parser.add_argument(
         "--finance-years",
@@ -145,7 +153,7 @@ def main() -> None:
         print(
             f"[Dry Run] config={args.config}, freq={args.frequencies}, full={args.full}, "
             f"resume={args.resume}, "
-            f"kline_years={args.years}, finance={not args.skip_finance} "
+            f"kline_years={args.years}, finance={args.include_finance} "
             f"(years={args.finance_years}), integrity={should_integrity}; "
             f"Akshare loop={args.akshare_loop}, iterations={args.iterations}, "
             f"skip_akshare={args.skip_akshare}"
@@ -159,7 +167,7 @@ def main() -> None:
         full_update=args.full,
         resume=args.resume,
         refresh_basic=args.refresh_basic,
-        include_finance=not args.skip_finance,
+        include_finance=args.include_finance,
         finance_years=args.finance_years,
         run_integrity=should_integrity,
     )
