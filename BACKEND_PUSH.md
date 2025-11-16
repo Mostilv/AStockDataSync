@@ -1,8 +1,8 @@
-# Backend Push & Industry Metrics
+# 后端推送与行业指标发布指南
 
-This quick reference explains how to push MongoDB data collected by AStockDataSync into the stock middle platform backend and how to publish industry momentum/width indicators.
+本文汇总如何将 AStockDataSync 采集到的 MongoDB 数据推送到股票中台后端，以及如何发布行业动量/宽度指标。
 
-## Configuration Recap
+## 配置回顾
 
 ```yaml
 stock_middle_platform_backend:
@@ -11,10 +11,10 @@ stock_middle_platform_backend:
   basic_path: "/stocks/basic"
   kline_path: "/stocks/kline"
   indicator_path: "/indicators/records"
-  username: "please-set-me"
-  password: "please-set-me"
+  username: "请填写用户名"
+  password: "请填写密码"
   provider: "astock-sync"
-  basic_target: "primary"      # matches /api/v1/stocks/targets
+  basic_target: "primary"      # 对应 /api/v1/stocks/targets
   kline_target: "primary"
   indicator_target: "primary"
   industry_metrics:
@@ -23,17 +23,17 @@ stock_middle_platform_backend:
     industry_limit: 28
 ```
 
-## CLI Examples
+## CLI 示例
 
 ```bash
 # 推送股票基础数据
 python main.py backend basic --batch-size 500
 
-# 推送日线或其他频率 K 线
+# 推送日线或其他频率的 K 线
 python main.py backend kline --frequency d --start-date 2024-01-01
 
-# 采集申万行业指标并推送 (industry_metrics)
+# 采集申万行业指标并推送（industry_metrics）
 python main.py backend indicators --metrics-window 12 --industry-limit 20
 ```
 
-`backend indicators` 使用 Akshare 的 Shenwan 指数接口计算动量与宽度后，调用 `/api/v1/indicators/records` 写入 `indicator=industry_metrics` 记录，供 Web 前端直接展示行业动量与行业宽度图表。
+`backend indicators` 会调用 Akshare 的申万行业接口计算动量与宽度，并通过 `/api/v1/indicators/records` 写入 `indicator=industry_metrics` 的记录，供 Web 前端直接渲染行业动量与行业宽度图表。
