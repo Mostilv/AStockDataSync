@@ -1,11 +1,12 @@
 import datetime as _dt
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import requests
 from bson import Decimal128, ObjectId
 from pymongo import ASCENDING, MongoClient
 from pymongo.collection import Collection
 
+from ..indicators.industry_metrics import IndustryMetricsCollector
 from ..utils.config_loader import load_config
 
 
@@ -45,6 +46,13 @@ class StockMiddlePlatformBackendSync:
         self.kline_payload_key = backend_cfg.get("kline_payload_key", "items")
         self.extra_basic_payload = backend_cfg.get("basic_extra_payload", {}) or {}
         self.extra_kline_payload = backend_cfg.get("kline_extra_payload", {}) or {}
+        self.provider = backend_cfg.get("provider", "astock-sync")
+        self.basic_target = backend_cfg.get("basic_target", "primary")
+        self.kline_target = backend_cfg.get("kline_target", "primary")
+        self.indicator_target = backend_cfg.get("indicator_target", "primary")
+        self.indicator_path = backend_cfg.get("indicator_path", "/api/indicators/records")
+        self.indicator_provider = backend_cfg.get("indicator_provider", self.provider)
+        self.industry_metrics_cfg = backend_cfg.get("industry_metrics", {}) or {}
 
         mongo_cfg = self.config.get("mongodb")
         if not mongo_cfg:
@@ -85,9 +93,21 @@ class StockMiddlePlatformBackendSync:
             cursor = cursor.limit(int(limit))
         total = 0
         for docs in self._batched(self._sanitize_cursor(cursor), batch):
-            payload = {self.basic_payload_key: docs, **self.extra_basic_payload}
+            items = [
+                payload
+                for payload in (self._transform_basic_doc(doc) for doc in docs)
+                if payload
+            ]
+            if not items:
+                continue
+            payload = {
+                "target": self.basic_target,
+                "provider": self.provider,
+                self.basic_payload_key: items,
+                **self.extra_basic_payload,
+            }
             self._post_json(self.basic_path, payload)
-            total += len(docs)
+            total += len(items)
         return total
 
     def push_kline(
@@ -127,13 +147,50 @@ class StockMiddlePlatformBackendSync:
 
         total = 0
         for docs in self._batched(self._sanitize_cursor(cursor), batch):
+            items = [
+                payload
+                for payload in (self._transform_kline_doc(doc, freq) for doc in docs)
+                if payload
+            ]
+            if not items:
+                continue
             payload = {
-                self.kline_payload_key: docs,
-                "frequency": freq,
+                "target": self.kline_target,
+                "provider": self.provider,
+                self.kline_payload_key: items,
                 **self.extra_kline_payload,
             }
             self._post_json(self.kline_path, payload)
-            total += len(docs)
+            total += len(items)
+        return total
+
+    def push_industry_metrics(
+        self,
+        lookback_days: Optional[int] = None,
+        industry_limit: Optional[int] = None,
+        codes: Optional[List[str]] = None,
+    ) -> int:
+        """Collect Shenwan industry metrics via Akshare and push to backend indicator API."""
+        cfg = self.industry_metrics_cfg
+        collector = IndustryMetricsCollector(
+            lookback_days=lookback_days
+            or int(cfg.get("lookback_days", 12) or 12),
+            momentum_period=int(cfg.get("momentum_period", 5) or 5),
+            industry_limit=industry_limit
+            or int(cfg.get("industry_limit", 0) or 0)
+            or None,
+            codes=codes or cfg.get("codes"),
+        )
+        records = collector.collect()
+        total = 0
+        for chunk in self._batched(records, self.batch_size):
+            payload = {
+                "target": self.indicator_target,
+                "provider": self.indicator_provider,
+                "records": chunk,
+            }
+            self._post_json(self.indicator_path, payload)
+            total += len(chunk)
         return total
 
     def close(self) -> None:
@@ -210,6 +267,83 @@ class StockMiddlePlatformBackendSync:
                 sanitized[key] = value
         return sanitized
 
+    def _transform_basic_doc(self, document: Dict) -> Optional[Dict]:
+        raw_code = document.get("code") or document.get("symbol")
+        if not raw_code:
+            return None
+        symbol = self._normalize_symbol(raw_code)
+        if not symbol:
+            return None
+        payload = self._clean_payload(document)
+        record = {
+            "symbol": symbol,
+            "name": document.get("code_name") or document.get("name") or symbol,
+            "exchange": symbol[:2],
+            "list_date": self._parse_date_field(document.get("ipoDate")),
+            "delist_date": self._parse_date_field(document.get("outDate")),
+            "status": document.get("status"),
+            "type": document.get("type"),
+            "market": document.get("market"),
+            "industry": document.get("industry"),
+            "payload": payload,
+        }
+        return {
+            key: value
+            for key, value in record.items()
+            if value not in (None, "", {})
+        }
+
+    def _transform_kline_doc(self, document: Dict, frequency: str) -> Optional[Dict]:
+        raw_code = document.get("code") or document.get("symbol")
+        if not raw_code:
+            return None
+        symbol = self._normalize_symbol(raw_code)
+        try:
+            trade_date = self._normalize_date(document.get("date"))
+        except BackendSyncError:
+            return None
+        if not symbol or not trade_date:
+            return None
+        timestamp = self._combine_timestamp(trade_date, document.get("time"))
+        record = {
+            "symbol": symbol,
+            "frequency": frequency,
+            "timestamp": timestamp,
+            "open": self._to_float(document.get("open")),
+            "high": self._to_float(document.get("high")),
+            "low": self._to_float(document.get("low")),
+            "close": self._to_float(document.get("close")),
+            "volume": self._to_float(document.get("volume")),
+            "amount": self._to_float(document.get("amount")),
+            "turnover_rate": self._to_float(document.get("turn")),
+            "adjust_flag": document.get("adjustflag"),
+            "trade_status": self._normalize_trade_status(document.get("tradestatus")),
+            "pct_change": self._to_float(document.get("pctChg")),
+            "pe_ttm": self._to_float(document.get("peTTM")),
+            "pb_mrq": self._to_float(document.get("pbMRQ")),
+            "ps_ttm": self._to_float(document.get("psTTM")),
+            "pcf_ncf_ttm": self._to_float(document.get("pcfNcfTTM")),
+            "payload": self._clean_payload(document),
+        }
+        required_keys = ("open", "high", "low", "close", "volume")
+        if any(record[key] is None for key in required_keys):
+            return None
+        return {
+            key: value
+            for key, value in record.items()
+            if value not in (None, "", {})
+        }
+
+    def _clean_payload(self, document: Dict) -> Dict:
+        payload: Dict[str, Any] = {}
+        for key, value in document.items():
+            if key == "_id":
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            payload[key] = value
+        return payload
+
     def _batched(self, iterator: Iterable[Dict], size: int) -> Iterator[List[Dict]]:
         batch: List[Dict] = []
         for item in iterator:
@@ -228,6 +362,62 @@ class StockMiddlePlatformBackendSync:
         if len(date_str) == 8 and date_str.isdigit():
             return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
         raise BackendSyncError(f"无法解析日期格式: {date_str}")
+
+    def _parse_date_field(self, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        try:
+            return self._normalize_date(str(value))
+        except BackendSyncError:
+            return None
+
+    def _combine_timestamp(
+        self, date_str: str, time_str: Optional[str]
+    ) -> str:
+        if not time_str:
+            return f"{date_str}T00:00:00"
+        clean = str(time_str).strip()
+        if ":" not in clean and len(clean) == 4:
+            clean = f"{clean[:2]}:{clean[2:]}:00"
+        if ":" in clean and len(clean.split(":")) == 2:
+            clean = f"{clean}:00"
+        return f"{date_str}T{clean}"
+
+    def _normalize_symbol(self, code: str) -> str:
+        token = (code or "").strip().upper()
+        if not token:
+            return ""
+        token = token.replace(".", "").replace("-", "")
+        if token.startswith("SH") or token.startswith("SZ") or token.startswith("BJ"):
+            return token
+        if token.startswith("0") or token.startswith("3"):
+            return f"SZ{token}"
+        if token.startswith("6"):
+            return f"SH{token}"
+        return token
+
+    def _normalize_trade_status(self, status: Optional[Any]) -> Optional[str]:
+        if status is None:
+            return None
+        text = str(status).strip().lower()
+        if text in {"1", "true", "trading", "open"}:
+            return "trading"
+        if text in {"0", "false", "halted", "suspend"}:
+            return "halted"
+        return None
+
+    def _to_float(self, value: Optional[Any]) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "nan"}:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     def __enter__(self) -> "StockMiddlePlatformBackendSync":
         return self

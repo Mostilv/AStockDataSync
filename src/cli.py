@@ -102,10 +102,20 @@ def handle_backend(args: argparse.Namespace) -> None:
                 limit=args.limit,
             )
             print(f"已推送 {total} 条 {args.frequency} 级别K线数据。")
+        elif args.action == "indicators":
+            total = manager.push_industry_metrics(
+                lookback_days=args.metrics_window,
+                industry_limit=args.industry_limit,
+                codes=args.industry_codes,
+            )
+            print(f"已推送 {total} 条行业指标数据。")
         else:
             raise ValueError(f"Unsupported backend action: {args.action}")
     finally:
         manager.close()
+
+
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,41 +228,63 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Backend commands
     backend_parser = subparsers.add_parser(
-        "backend",
-        help="Push MongoDB data to stock_middle_platform_backend.",
+        'backend',
+        help='Push MongoDB data to stock_middle_platform_backend.',
     )
     backend_parser.add_argument(
-        "action",
-        choices=["basic", "kline"],
-        help="basic: 推送股票基础列表; kline: 推送指定频率的历史K线。",
+        'action',
+        choices=['basic', 'kline', 'indicators'],
+        help=(
+            'basic: 推送股票基础列表; '
+            'kline: 推送指定频率的历史K线数据; '
+            'indicators: 推送行业动量/宽度指标。'
+        ),
     )
     backend_parser.add_argument(
-        "--frequency",
-        default="d",
-        choices=["d", "w", "m", "15", "60"],
-        help="K线同步频率，仅 action=kline 时有效 (默认: d)。",
+        '--frequency',
+        default='d',
+        choices=['d', 'w', 'm', '15', '60'],
+        help='K线同步频率，仅 action=kline 时有效 (默认: d)。',
     )
     backend_parser.add_argument(
-        "--start-date",
+        '--start-date',
         default=None,
-        help="K线起始日期 (YYYY-MM-DD 或 YYYYMMDD)。",
+        help='K线起始日期 (YYYY-MM-DD 或 YYYYMMDD)。',
     )
     backend_parser.add_argument(
-        "--end-date",
+        '--end-date',
         default=None,
-        help="K线结束日期 (YYYY-MM-DD 或 YYYYMMDD)。",
+        help='K线结束日期 (YYYY-MM-DD 或 YYYYMMDD)。',
     )
     backend_parser.add_argument(
-        "--batch-size",
+        '--batch-size',
         type=int,
         default=None,
-        help="单批推送条数，默认读取配置。",
+        help='单批推送条数，默认读取配置。',
     )
     backend_parser.add_argument(
-        "--limit",
+        '--limit',
         type=int,
         default=None,
-        help="限制推送的最大条数，用于调试。",
+        help='限制推送的最大条数，用于调试。',
+    )
+    backend_parser.add_argument(
+        '--metrics-window',
+        type=int,
+        default=None,
+        help='行业指标回溯天数，仅 action=indicators 时生效。',
+    )
+    backend_parser.add_argument(
+        '--industry-limit',
+        type=int,
+        default=None,
+        help='限制推送的行业数量，仅 action=indicators 时生效。',
+    )
+    backend_parser.add_argument(
+        '--industry-codes',
+        nargs='+',
+        default=None,
+        help='仅推送指定申万行业代码 (空格分隔，多选)。',
     )
     backend_parser.set_defaults(handler=handle_backend)
 

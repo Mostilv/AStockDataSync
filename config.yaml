@@ -36,10 +36,11 @@ akshare:
 
 # stock_middle_platform_backend 配置
 stock_middle_platform_backend:
-  base_url: "http://localhost:8000/api"
+  base_url: "http://localhost:8000/api/v1"
   login_path: "/auth/login"
   basic_path: "/stocks/basic"
   kline_path: "/stocks/kline"
+  indicator_path: "/indicators/records"
   username: "please-set-me"
   password: "please-set-me"
   verify_ssl: true
@@ -48,3 +49,11 @@ stock_middle_platform_backend:
   token_field: "token"
   token_prefix: "Bearer"
   token_header: "Authorization"
+  provider: "astock-sync"
+  basic_target: "primary"
+  kline_target: "primary"
+  indicator_target: "primary"
+  industry_metrics:
+    lookback_days: 12
+    momentum_period: 5
+    industry_limit: 28
