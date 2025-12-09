@@ -18,12 +18,12 @@ ADJUSTFLAG = "3"
 DATE_FORMAT = "%Y-%m-%d"
 RETRY_LIMIT = 3
 DAYS_PER_YEAR = 365
+SOURCE_BAOSTOCK = "baostock"
 DEFAULT_INTEGRITY_WINDOWS = {
     "d": 30,
     "w": 400,
     "m": 1500,
-    "15": 15,
-    "60": 45,
+    "5": 15,
 }
 DEFAULT_DAILY_CALL_LIMIT = 150_000
 DEFAULT_CALL_TRACKER_PATH = Path.home() / ".astock_baostock_calls.json"
@@ -37,8 +37,7 @@ FREQ_DESC = {
     "d": "同步日线",
     "w": "同步周线",
     "m": "同步月线",
-    "15": "同步15分钟",
-    "60": "同步60分钟",
+    "5": "同步5分钟",
 }
 
 
@@ -108,15 +107,17 @@ class BaostockManager:
         self.daily_col = self.db[baostock_cfg["daily"]]
         self.weekly_col = self.db[baostock_cfg.get("weekly", "weekly_adjusted")]
         self.monthly_col = self.db[baostock_cfg.get("monthly", "monthly_adjusted")]
-        self.minute_15_col = self.db[baostock_cfg["minute_15"]]
-        self.minute_60_col = self.db[baostock_cfg["minute_60"]]
+        self.minute_5_col = self.db[baostock_cfg["minute_5"]]
         self.finance_col = self.db[baostock_cfg.get("finance_quarterly", "finance_quarterly")]
 
         self.history_years = int(baostock_cfg.get("history_years", 10))
         self.finance_history_years = int(baostock_cfg.get("finance_history_years", 10))
         self.minute_start_date = baostock_cfg.get("minute_start_date", MINUTE_START_DATE)
+        self.minute_lookback_days = (
+            int(baostock_cfg.get("minute_lookback_days")) if baostock_cfg.get("minute_lookback_days") else None
+        )
         self.default_frequencies: Tuple[str, ...] = tuple(
-            baostock_cfg.get("frequencies", ["d", "w", "m", "15", "60"])
+            baostock_cfg.get("frequencies", ["d", "w", "m", "5"])
         )
         integrity_cfg = baostock_cfg.get("integrity_windows", {})
         self.integrity_windows: Dict[str, int] = {
@@ -146,17 +147,12 @@ class BaostockManager:
                 "min_start": START_DATE,
                 "default_years": self.history_years,
             },
-            "15": {
-                "collection": self.minute_15_col,
-                "field": "last_minute_15_date",
+            "5": {
+                "collection": self.minute_5_col,
+                "field": "last_minute_5_date",
                 "min_start": self.minute_start_date,
                 "default_years": None,
-            },
-            "60": {
-                "collection": self.minute_60_col,
-                "field": "last_minute_60_date",
-                "min_start": self.minute_start_date,
-                "default_years": None,
+                "lookback_days": self.minute_lookback_days,
             },
         }
 
@@ -178,12 +174,11 @@ class BaostockManager:
             if "code_1_date_1" not in col.index_information():
                 col.create_index([("code", ASCENDING), ("date", ASCENDING)], unique=True)
 
-        for col in (self.minute_15_col, self.minute_60_col):
-            if "code_1_date_1_time_1" not in col.index_information():
-                col.create_index(
-                    [("code", ASCENDING), ("date", ASCENDING), ("time", ASCENDING)],
-                    unique=True,
-                )
+        if "code_1_date_1_time_1" not in self.minute_5_col.index_information():
+            self.minute_5_col.create_index(
+                [("code", ASCENDING), ("date", ASCENDING), ("time", ASCENDING)],
+                unique=True,
+            )
 
         if "code_1_year_1_quarter_1_report_type_1" not in self.finance_col.index_information():
             self.finance_col.create_index(
@@ -231,6 +226,8 @@ class BaostockManager:
                         "outDate": row[3],
                         "type": row[4],
                         "status": row[5],
+                        "source": SOURCE_BAOSTOCK,
+                        "temporary": False,
                     }
                 )
 
@@ -282,7 +279,7 @@ class BaostockManager:
                 "pbMRQ",
                 "isST",
             ]
-        elif frequency in ("15", "60"):
+        elif frequency == "5":
             fields = "date,time,code,open,high,low,close,volume,amount,adjustflag"
             expected_fields = [
                 "date",
@@ -312,7 +309,7 @@ class BaostockManager:
                 "pctChg",
             ]
         else:
-            raise ValueError("Unsupported frequency. Choose from d/w/m/15/60.")
+            raise ValueError("Unsupported frequency. Choose from d/w/m/5.")
 
         for attempt in range(RETRY_LIMIT):
             try:
@@ -387,7 +384,8 @@ class BaostockManager:
             field_name: str = settings["field"]
             min_start = settings["min_start"]
             default_years = settings["default_years"]
-            freq_lookback = lookback_years if lookback_years is not None else default_years
+            lookback_days = settings.get("lookback_days")
+            freq_lookback_years = lookback_years if (lookback_years is not None and freq != "5") else default_years
 
             desc = FREQ_DESC.get(freq, f"同步{freq}数据")
             with tqdm(
@@ -402,10 +400,11 @@ class BaostockManager:
                     start_date_str = self._resolve_start_date(
                         last_date,
                         full_update,
-                        freq_lookback,
+                        freq_lookback_years,
                         end_dt,
                         min_start,
                         resume_from_existing=resume,
+                        lookback_days=lookback_days,
                     )
                     if not start_date_str or start_date_str > end_date_str:
                         pbar.update(1)
@@ -435,6 +434,71 @@ class BaostockManager:
                         )
                         tqdm.write(
                             f"{code} {freq} 数据更新 {len(data_list)} 条，最新日期 {new_last_date}"
+                        )
+                    pbar.update(1)
+
+    def sync_limit_up_minute_data(
+        self,
+        days: int = 7,
+        frequencies: Sequence[str] = ("5",),
+        pct_threshold: float = 9.5,
+    ) -> None:
+        """Sync minute data for limit-up stocks within the recent window."""
+        if not frequencies:
+            print("未提供分钟频率，跳过涨停分钟同步。")
+            return
+
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=max(1, days))
+        end_date_str = end_dt.strftime(DATE_FORMAT)
+
+        freq_list = [freq for freq in frequencies if freq == "5"]
+        if not freq_list:
+            print("分钟频率仅支持 5，已跳过。")
+            return
+
+        date_filter = {
+            "$gte": start_dt.strftime(DATE_FORMAT),
+            "$lte": end_date_str,
+        }
+        query = {"date": date_filter, "pctChg": {"$gte": pct_threshold}}
+        codes = sorted(
+            {doc["code"] for doc in self.daily_col.find(query, {"code": 1}) if doc.get("code")}
+        )
+        if not codes:
+            print(f"近 {days} 天未找到涨停股票，跳过分钟数据同步。")
+            return
+
+        print(f"近 {days} 天涨停股票数量：{len(codes)}，开始同步分钟数据 {freq_list}。")
+        for freq in freq_list:
+            settings = self._get_collection_meta(freq)
+            collection: Collection = settings["collection"]
+            min_start = datetime.strptime(settings["min_start"], DATE_FORMAT)
+            start_date_str = max(start_dt, min_start).strftime(DATE_FORMAT)
+
+            with tqdm(
+                total=len(codes),
+                desc=f"涨停{freq}分钟同步",
+                unit="stock",
+                dynamic_ncols=True,
+            ) as pbar:
+                for code in codes:
+                    data_list = self.query_history_k_data_plus(
+                        code,
+                        start_date_str,
+                        end_date_str,
+                        freq,
+                    )
+                    if not data_list:
+                        pbar.update(1)
+                        continue
+
+                    new_last_date = self._bulk_upsert_kline(collection, freq, data_list)
+                    if new_last_date:
+                        self.stock_basic_col.update_one(
+                            {"code": code},
+                            {"$set": {settings["field"]: new_last_date}},
+                            upsert=True,
                         )
                     pbar.update(1)
 
@@ -631,6 +695,7 @@ class BaostockManager:
         end_dt: datetime,
         min_start_date: str,
         resume_from_existing: bool = False,
+        lookback_days: Optional[int] = None,
     ) -> Optional[str]:
         min_start_dt = datetime.strptime(min_start_date, DATE_FORMAT)
         if last_date and (resume_from_existing or not full_update):
@@ -639,6 +704,9 @@ class BaostockManager:
             candidate = min_start_dt
         elif lookback_years:
             lookback_dt = end_dt - timedelta(days=lookback_years * DAYS_PER_YEAR)
+            candidate = max(min_start_dt, lookback_dt)
+        elif lookback_days:
+            lookback_dt = end_dt - timedelta(days=lookback_days)
             candidate = max(min_start_dt, lookback_dt)
         else:
             candidate = min_start_dt
@@ -657,6 +725,8 @@ class BaostockManager:
                 data[key] = float(value)
             except ValueError:
                 data[key] = value
+        data["source"] = SOURCE_BAOSTOCK
+        data["temporary"] = False
         return data
 
     def _bulk_upsert_kline(

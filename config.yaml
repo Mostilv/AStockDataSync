@@ -9,20 +9,19 @@ baostock:
   daily: "daily_adjusted"
   weekly: "weekly_adjusted"
   monthly: "monthly_adjusted"
-  minute_15: "minute_15_adjusted"
-  minute_60: "minute_60_adjusted"
+  minute_5: "minute_5_adjusted"
   finance_quarterly: "finance_quarterly"
-  history_years: 10             # 日/周/月默认回溯年限
+  history_years: 3             # 日/周/月默认回溯年限
   finance_history_years: 10     # 季频财务回溯年限
   daily_call_limit: 150000      # Baostock 每日调用上限
   minute_start_date: "2019-01-02"
-  frequencies: ["d", "w", "m", "15", "60"]
+  minute_lookback_days: 30
+  frequencies: ["d", "w", "m", "5"]
   integrity_windows:
     d: 30
     w: 400
     m: 1500
-    "15": 15
-    "60": 45
+    "5": 15
 
 # akshare 配置
 # 用于获取当日实时行情（baostock 无实时）以及财报、baostock 未覆盖的数据
@@ -31,8 +30,11 @@ akshare:
   kline: "kline"
   daily: "daily"
   symbols: []                 # 留空时自动读取 baostock.basic 中的 code
-  timeframes: ["15m", "60m"]  # 需要合成的周期
+  timeframes: ["5m"]  # 需要合成的周期
   sleep_seconds: 5            # 实时循环模式的轮询间隔
+  source_tag: "akshare"       # 数据源标记（临时补齐）
+  mirror_to_baostock: true    # 将 akshare 分钟线以临时数据写入 baostock.minute_5，待官方数据覆盖
+  force_ipv4: true            # 避免 IPv6 路由被拦截，强制东财走 IPv4
 
 # stock_middle_platform_backend 配置
 stock_middle_platform_backend:

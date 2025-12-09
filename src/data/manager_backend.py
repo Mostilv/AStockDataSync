@@ -6,6 +6,7 @@ from bson import Decimal128, ObjectId
 from pymongo import ASCENDING, MongoClient
 from pymongo.collection import Collection
 
+from ..indicators.industry_breadth import IndustryBreadthCalculator
 from ..indicators.industry_metrics import IndustryMetricsCollector
 from ..utils.config_loader import load_config
 
@@ -21,6 +22,7 @@ class StockMiddlePlatformBackendSync:
     """Upload Baostock data to stock_middle_platform_backend with login enforcement."""
 
     def __init__(self, config_path: str = "config.yaml") -> None:
+        self.config_path = config_path
         self.config = load_config(config_path)
         backend_cfg = self.config.get("stock_middle_platform_backend")
         if not backend_cfg:
@@ -53,6 +55,8 @@ class StockMiddlePlatformBackendSync:
         self.indicator_path = backend_cfg.get("indicator_path", "/api/indicators/records")
         self.indicator_provider = backend_cfg.get("indicator_provider", self.provider)
         self.industry_metrics_cfg = backend_cfg.get("industry_metrics", {}) or {}
+        # industry_breadth is optional; if missing, defaults are applied in the calculator.
+        self.industry_breadth_cfg = backend_cfg.get("industry_breadth", {}) or {}
 
         mongo_cfg = self.config.get("mongodb")
         if not mongo_cfg:
@@ -68,8 +72,7 @@ class StockMiddlePlatformBackendSync:
             "d": baostock_db[baostock_cfg["daily"]],
             "w": baostock_db[baostock_cfg.get("weekly", "weekly_adjusted")],
             "m": baostock_db[baostock_cfg.get("monthly", "monthly_adjusted")],
-            "15": baostock_db[baostock_cfg["minute_15"]],
-            "60": baostock_db[baostock_cfg["minute_60"]],
+            "5": baostock_db[baostock_cfg["minute_5"]],
         }
 
         self.session = requests.Session()
@@ -137,7 +140,7 @@ class StockMiddlePlatformBackendSync:
 
         collection = self.kline_collections[freq]
         sort_fields: List[Tuple[str, int]] = [("date", ASCENDING)]
-        if freq in ("15", "60"):
+        if freq == "5":
             sort_fields.append(("time", ASCENDING))
 
         cursor = collection.find(query)
@@ -182,6 +185,40 @@ class StockMiddlePlatformBackendSync:
             codes=codes or cfg.get("codes"),
         )
         records = collector.collect()
+        total = 0
+        for chunk in self._batched(records, self.batch_size):
+            payload = {
+                "target": self.indicator_target,
+                "provider": self.indicator_provider,
+                "records": chunk,
+            }
+            self._post_json(self.indicator_path, payload)
+            total += len(chunk)
+        return total
+
+    def push_industry_breadth(
+        self,
+        lookback_days: Optional[int] = None,
+        ma_window: Optional[int] = None,
+        indicator_name: Optional[str] = None,
+        save_local: Optional[bool] = None,
+    ) -> int:
+        """Compute industry breadth (pct above MA) and push to backend indicator API."""
+        cfg = self.industry_breadth_cfg
+        calculator = IndustryBreadthCalculator(
+            config_path=self.config_path,
+            indicator=indicator_name or cfg.get("indicator") or "industry_breadth_ma20",
+            timeframe=cfg.get("timeframe", "1d"),
+            lookback_days=lookback_days or cfg.get("lookback_days"),
+            ma_window=ma_window or cfg.get("ma_window"),
+            collection_name=cfg.get("collection"),
+            save_local=save_local if save_local is not None else cfg.get("save_local", True),
+        )
+        try:
+            records = calculator.collect()
+        finally:
+            calculator.close()
+
         total = 0
         for chunk in self._batched(records, self.batch_size):
             payload = {

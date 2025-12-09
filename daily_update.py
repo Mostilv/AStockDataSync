@@ -18,8 +18,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--frequencies",
         nargs="+",
-        default=["d", "w", "m", "15", "60"],
-        help="需要同步的 baostock 周期，默认覆盖日/周/月/15m/60m。",
+        default=["d", "w", "m", "5"],
+        help="需要同步的 baostock 周期，默认覆盖日/周/月/5m。",
     )
     parser.add_argument(
         "--years",
