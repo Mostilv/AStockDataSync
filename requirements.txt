@@ -10,3 +10,5 @@ PyYAML
 # 辅助工具
 tqdm
 requests
+mplfinance
+mplcursors
