@@ -10,13 +10,13 @@ baostock:
   weekly: "weekly_adjusted"
   monthly: "monthly_adjusted"
   minute_5: "minute_5_adjusted"
-  finance_quarterly: "finance_quarterly"
   history_years: 3             # 日/周/月默认回溯年限
-  finance_history_years: 10     # 季频财务回溯年限
   daily_call_limit: 150000      # Baostock 每日调用上限
   minute_start_date: "2019-01-02"
   minute_lookback_days: 30
   frequencies: ["d", "w", "m", "5"]
+  index_codes: ["sh.000001"]   # 指数等需要保持的 code
+  indicator_collection: "indicator_data"
   integrity_windows:
     d: 30
     w: 400
@@ -59,3 +59,46 @@ stock_middle_platform_backend:
     lookback_days: 12
     momentum_period: 5
     industry_limit: 28
+
+# workflow 配置
+workflow:
+  daily_update:
+    refresh_basic: true
+    baostock:
+      frequencies: ["d", "w", "m", "5"]
+      full_update: false
+      resume: true
+      lookback_years: 3
+      schedule:
+        weekly: true
+        monthly: true
+    akshare:
+      enabled: false
+      loop_mode: false
+      iterations: null
+      ignore_hours: false
+    tagging:
+      industry: true
+      concept: true
+    indicators:
+      enabled: true
+      collection: "indicator_data"
+      run_industry_metrics: true
+      run_industry_breadth: true
+      industry_metrics_lookback_days: 12
+      industry_metrics_momentum: 5
+      industry_limit: 28
+      industry_codes: []
+      breadth_indicator: "industry_breadth_ma20"
+      breadth_timeframe: "1d"
+      breadth_lookback_days: 60
+      breadth_ma_window: 20
+      jobs:
+        - name: "sse_macd"
+          type: "macd"
+          symbol: "sh.000001"
+          frequency: "d"
+          params:
+            fast: 12
+            slow: 26
+            signal: 9

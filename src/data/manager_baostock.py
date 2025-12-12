@@ -3,8 +3,9 @@ import baostock as bs
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
+import akshare as ak
 from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
 from pymongo.collection import Collection
 from pymongo.errors import BulkWriteError
@@ -119,6 +120,12 @@ class BaostockManager:
         self.default_frequencies: Tuple[str, ...] = tuple(
             baostock_cfg.get("frequencies", ["d", "w", "m", "5"])
         )
+        self.index_codes: Tuple[str, ...] = tuple(
+            code.strip()
+            for code in baostock_cfg.get("index_codes", []) or []
+            if str(code).strip()
+        )
+        self.tagging_cfg: Dict[str, Any] = baostock_cfg.get("tagging", {}) or {}
         integrity_cfg = baostock_cfg.get("integrity_windows", {})
         self.integrity_windows: Dict[str, int] = {
             freq: int(integrity_cfg.get(freq, DEFAULT_INTEGRITY_WINDOWS.get(freq, 0)) or 0)
@@ -242,7 +249,54 @@ class BaostockManager:
                     {"$set": stock},
                     upsert=True,
                 )
-        print(f"股票基本信息更新完成，共处理 {len(stock_list)} 条记录。")
+            print(f"股票基本信息更新完成，共处理 {len(stock_list)} 条记录。")
+
+    def refresh_industry_and_concepts(
+        self,
+        include_industry: bool = True,
+        include_concept: bool = True,
+    ) -> None:
+        """Persist Shenwan L1 industry + concept tags into stock_basic."""
+        if not include_industry and not include_concept:
+            return
+
+        industry_map: Dict[str, Dict[str, str]] = {}
+        concept_map: Dict[str, Set[str]] = {}
+
+        if include_industry:
+            industry_map = self._load_sw_industry_mapping()
+            if industry_map:
+                print(f"已获取 {len(industry_map)} 条申万一级行业归属。")
+            else:
+                print("未获取到申万一级行业归属。")
+
+        if include_concept:
+            concept_map = self._load_concept_mapping()
+            if concept_map:
+                print(f"已获取 {len(concept_map)} 条个股概念标签。")
+            else:
+                print("未获取到概念标签。")
+
+        if not industry_map and not concept_map:
+            return
+
+        codes = set(industry_map.keys()) | set(concept_map.keys())
+        for code in codes:
+            payload: Dict[str, Any] = {}
+            if code in industry_map:
+                payload.update(industry_map[code])
+            if code in concept_map:
+                payload["concepts"] = sorted(concept_map[code])
+            if not payload:
+                continue
+            try:
+                self.stock_basic_col.update_one(
+                    {"code": code},
+                    {"$set": payload, "$setOnInsert": {"source": SOURCE_BAOSTOCK, "temporary": True}},
+                    upsert=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                tqdm.write(f"写入行业/概念标签失败 {code}: {exc}")
 
     # ------------------------------------------------------------------ #
     # K 线同步
@@ -370,7 +424,7 @@ class BaostockManager:
         for meta in self.collection_meta.values():
             projection[meta["field"]] = 1
 
-        stock_list = list(self.stock_basic_col.find({}, projection))
+        stock_list = self._compose_target_stock_list(projection)
         if not stock_list:
             print("未找到股票基础信息，跳过K线同步。")
             return
@@ -683,9 +737,41 @@ class BaostockManager:
             raise ValueError(f"不支持的频率 {frequency}，允许 {list(self.collection_meta.keys())}")
         return self.collection_meta[frequency]
 
+    def _compose_target_stock_list(self, projection: Dict[str, int]) -> List[Dict[str, Any]]:
+        """Combine stock_basic with configured index codes for synchronization."""
+        stock_list = list(self.stock_basic_col.find({}, projection))
+        existing_codes = {item.get("code") for item in stock_list}
+        for code in self.index_codes:
+            if code in existing_codes:
+                continue
+            placeholder = {
+                "code": code,
+                "source": SOURCE_BAOSTOCK,
+                "temporary": True,
+            }
+            self.stock_basic_col.update_one({"code": code}, {"$setOnInsert": placeholder}, upsert=True)
+            stock_list.append({"code": code})
+        return stock_list
+
     def _latest_date_in_collection(self, collection: Collection, code: str) -> Optional[str]:
         record = collection.find_one({"code": code}, {"date": 1}, sort=[("date", DESCENDING)])
         return record["date"] if record else None
+
+    def needs_backfill(self, frequency: str, expected_date: Optional[str] = None) -> bool:
+        settings = self._get_collection_meta(frequency)
+        collection: Collection = settings["collection"]
+        field_name: str = settings["field"]
+
+        if collection.count_documents({}) == 0:
+            return True
+        missing = self.stock_basic_col.count_documents({field_name: {"$exists": False}})
+        if missing > 0:
+            return True
+        if expected_date:
+            stale = self.stock_basic_col.count_documents({field_name: {"$lt": expected_date}})
+            if stale > 0:
+                return True
+        return False
 
     def _resolve_start_date(
         self,
@@ -830,3 +916,81 @@ class BaostockManager:
 
         print(f"获取{code} {year}Q{quarter} 财务数据失败，超出最大重试次数。")
         return []
+
+    # ------------------------------------------------------------------ #
+    # Tag helpers (industry/concept)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _normalize_sw_component(code: str) -> Optional[str]:
+        token = (code or "").strip().upper().replace(".SI", "").replace(".", "")
+        if not token:
+            return None
+        if token.startswith(("60", "68", "56", "66")):
+            return f"sh.{token[:6]}"
+        if token.startswith(("00", "30")):
+            return f"sz.{token[:6]}"
+        if token.startswith(("43", "83", "87")):
+            return f"bj.{token[:6]}"
+        if len(token) >= 6:
+            return f"sz.{token[:6]}"
+        return None
+
+    def _load_sw_industry_mapping(self) -> Dict[str, Dict[str, str]]:
+        try:
+            df = ak.sw_index_first_info()
+        except Exception as exc:  # noqa: BLE001
+            tqdm.write(f"加载申万一级行业列表失败: {exc}")
+            return {}
+        if df is None or df.empty:
+            return {}
+        df = df[["行业代码", "行业名称"]].dropna()
+        industry_map: Dict[str, Dict[str, str]] = {}
+        for _, row in df.iterrows():
+            code = str(row["行业代码"]).replace(".SI", "").strip()
+            name = str(row["行业名称"]).strip()
+            try:
+                members = ak.index_component_sw(code)
+            except Exception as exc:  # noqa: BLE001
+                tqdm.write(f"获取行业成分失败 {code}: {exc}")
+                continue
+            if members is None or members.empty:
+                continue
+            for _, r in members.iterrows():
+                stock_code = self._normalize_sw_component(str(r.get("证券代码") or ""))
+                if not stock_code:
+                    continue
+                industry_map[stock_code] = {
+                    "industry_sw_code": code,
+                    "industry_sw_name": name,
+                }
+        return industry_map
+
+    def _load_concept_mapping(self) -> Dict[str, Set[str]]:
+        try:
+            concept_df = ak.stock_board_concept_name_ths()
+        except Exception as exc:  # noqa: BLE001
+            tqdm.write(f"加载概念列表失败: {exc}")
+            return {}
+        if concept_df is None or concept_df.empty:
+            return {}
+
+        mapping: Dict[str, Set[str]] = {}
+        for _, row in concept_df.iterrows():
+            concept_code = str(row.get("code") or row.get("板块代码") or "").strip()
+            concept_name = str(row.get("name") or row.get("板块名称") or "").strip()
+            if not concept_code or not concept_name:
+                continue
+            try:
+                members = ak.stock_board_cons_ths(symbol=concept_code)
+            except Exception as exc:  # noqa: BLE001
+                tqdm.write(f"获取概念成分失败 {concept_code}: {exc}")
+                continue
+            if members is None or members.empty:
+                continue
+            for _, r in members.iterrows():
+                raw_code = str(r.get("代码") or "").strip()
+                normalized = self._normalize_sw_component(raw_code)
+                if not normalized:
+                    continue
+                mapping.setdefault(normalized, set()).add(concept_name)
+        return mapping
