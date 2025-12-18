@@ -134,6 +134,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print planned tasks without hitting external data sources.",
     )
+    parser.add_argument(
+        "--skip-sync",
+        action="store_true",
+        help="Skip data fetching (baostock/akshare) and only run indicators.",
+    )
     return parser.parse_args()
 
 
@@ -198,7 +203,6 @@ def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: b
     )
     tagging_cfg = daily_cfg.get("tagging", {}) or {}
     include_industry = bool(tagging_cfg.get("industry", True))
-    include_concept = bool(tagging_cfg.get("concept", True))
 
     with BaostockManager(config_path=config_path) as manager:
         planner = TradeCalendarHelper()
@@ -210,17 +214,14 @@ def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: b
                 f"[Dry Run] baostock sync -> refresh_basic={refresh_basic}, "
                 f"frequencies={frequencies}, full_update={full_update}, "
                 f"resume={resume}, lookback_years={lookback_years}, "
-                f"industry_tag={include_industry}, concept_tag={include_concept}"
+                f"industry_tag={include_industry}"
             )
             return
 
         if refresh_basic:
             manager.query_stock_basic(refresh=False)
-        if include_industry or include_concept:
-            manager.refresh_industry_and_concepts(
-                include_industry=include_industry,
-                include_concept=include_concept,
-            )
+        if include_industry:
+            manager.refresh_industry_and_concepts(include_industry=include_industry)
 
         if not frequencies:
             print("No baostock K-line frequency scheduled today; skipping K-line sync.")
@@ -271,8 +272,11 @@ def main() -> None:
     config_path = DEFAULT_CONFIG_PATH
     config, daily_cfg = load_daily_job_config(config_path)
 
-    run_baostock_job(config_path, config, daily_cfg, dry_run=args.dry_run)
-    run_akshare_job(config_path, daily_cfg, dry_run=args.dry_run)
+    if args.skip_sync:
+        print("[Skip Sync] Only running indicator jobs.")
+    else:
+        run_baostock_job(config_path, config, daily_cfg, dry_run=args.dry_run)
+        run_akshare_job(config_path, daily_cfg, dry_run=args.dry_run)
     run_indicator_jobs(config_path, config, daily_cfg, dry_run=args.dry_run)
 
 

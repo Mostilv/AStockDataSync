@@ -3,7 +3,7 @@ import baostock as bs
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import akshare as ak
 from pymongo import ASCENDING, DESCENDING, MongoClient, UpdateOne
@@ -254,39 +254,19 @@ class BaostockManager:
     def refresh_industry_and_concepts(
         self,
         include_industry: bool = True,
-        include_concept: bool = True,
     ) -> None:
-        """Persist Shenwan L1 industry + concept tags into stock_basic."""
-        if not include_industry and not include_concept:
+        """Persist Shenwan L1 industry tags into stock_basic."""
+        if not include_industry:
             return
 
-        industry_map: Dict[str, Dict[str, str]] = {}
-        concept_map: Dict[str, Set[str]] = {}
-
-        if include_industry:
-            industry_map = self._load_sw_industry_mapping()
-            if industry_map:
-                print(f"已获取 {len(industry_map)} 条申万一级行业归属。")
-            else:
-                print("未获取到申万一级行业归属。")
-
-        if include_concept:
-            concept_map = self._load_concept_mapping()
-            if concept_map:
-                print(f"已获取 {len(concept_map)} 条个股概念标签。")
-            else:
-                print("未获取到概念标签。")
-
-        if not industry_map and not concept_map:
+        industry_map: Dict[str, Dict[str, str]] = self._load_sw_industry_mapping()
+        if industry_map:
+            print(f"???{len(industry_map)} ??????????")
+        else:
+            print("?????????????")
             return
 
-        codes = set(industry_map.keys()) | set(concept_map.keys())
-        for code in codes:
-            payload: Dict[str, Any] = {}
-            if code in industry_map:
-                payload.update(industry_map[code])
-            if code in concept_map:
-                payload["concepts"] = sorted(concept_map[code])
+        for code, payload in industry_map.items():
             if not payload:
                 continue
             try:
@@ -296,7 +276,8 @@ class BaostockManager:
                     upsert=True,
                 )
             except Exception as exc:  # noqa: BLE001
-                tqdm.write(f"写入行业/概念标签失败 {code}: {exc}")
+                tqdm.write(f"???????? {code}: {exc}")
+
 
     # ------------------------------------------------------------------ #
     # K 线同步
@@ -918,7 +899,7 @@ class BaostockManager:
         return []
 
     # ------------------------------------------------------------------ #
-    # Tag helpers (industry/concept)
+    # Tag helpers (industry)
     # ------------------------------------------------------------------ #
     @staticmethod
     def _normalize_sw_component(code: str) -> Optional[str]:
@@ -964,33 +945,3 @@ class BaostockManager:
                     "industry_sw_name": name,
                 }
         return industry_map
-
-    def _load_concept_mapping(self) -> Dict[str, Set[str]]:
-        try:
-            concept_df = ak.stock_board_concept_name_ths()
-        except Exception as exc:  # noqa: BLE001
-            tqdm.write(f"加载概念列表失败: {exc}")
-            return {}
-        if concept_df is None or concept_df.empty:
-            return {}
-
-        mapping: Dict[str, Set[str]] = {}
-        for _, row in concept_df.iterrows():
-            concept_code = str(row.get("code") or row.get("板块代码") or "").strip()
-            concept_name = str(row.get("name") or row.get("板块名称") or "").strip()
-            if not concept_code or not concept_name:
-                continue
-            try:
-                members = ak.stock_board_cons_ths(symbol=concept_code)
-            except Exception as exc:  # noqa: BLE001
-                tqdm.write(f"获取概念成分失败 {concept_code}: {exc}")
-                continue
-            if members is None or members.empty:
-                continue
-            for _, r in members.iterrows():
-                raw_code = str(r.get("代码") or "").strip()
-                normalized = self._normalize_sw_component(raw_code)
-                if not normalized:
-                    continue
-                mapping.setdefault(normalized, set()).add(concept_name)
-        return mapping

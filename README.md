@@ -117,7 +117,6 @@ workflow:
       ignore_hours: false
     tagging:
       industry: true
-      concept: true
     indicators:
       enabled: true
       collection: "indicator_data"
