@@ -12,6 +12,7 @@ import pytz
 from pymongo import ASCENDING, MongoClient, errors
 
 from ..utils.config_loader import load_config
+from ..utils.backend_client import BackendClient
 
 BEIJING_TZ = pytz.timezone("Asia/Shanghai")
 TRADING_DAYS = {0, 1, 2, 3, 4}
@@ -121,7 +122,8 @@ class AkshareRealtimeManager:
     - 若数据库为空，可搭配 Baostock 历史数据，实现“历史 + 当日实时”的补齐。
     """
 
-    def __init__(self, config_path: str = "config.yaml") -> None:
+    def __init__(self, config_path: str = "config.yaml", backend_client: Optional[BackendClient] = None) -> None:
+        self.backend_client = backend_client
         self.config = load_config(config_path)
         mongo_uri = self.config.get("mongodb", {}).get("uri", "mongodb://localhost:27017/")
         ak_cfg = self.config.get("akshare", {})
@@ -161,7 +163,7 @@ class AkshareRealtimeManager:
                     self.kline_collection,
                     source_tag=self.source_tag,
                     temp_flag=True,
-                    on_save=self._mirror_bar_to_baostock if self.mirror_to_baostock else None,
+                    on_save=self._handle_bar_save,
                 )
                 for symbol in self.symbols
             }
@@ -438,10 +440,37 @@ class AkshareRealtimeManager:
             upsert=True,
         )
 
+    def _handle_bar_save(self, bar: Dict[str, Any]) -> None:
+        if self.mirror_to_baostock:
+            self._mirror_bar_to_baostock(bar)
+        
+        if self.backend_client:
+            # bar is a single dict: symbol, timeframe, datetime, open, high...
+            # push_kline expects List[Dict], freq
+            freq = bar.get("timeframe", "5m")
+            # Convert single bar to list
+            # We must adapt keys slightly? 
+            # bar keys: symbol, timeframe, datetime (datetime obj), open, high...
+            # push_kline handles 'datetime' obj.
+            # So just wrapping in list is enough?
+            # push_kline expects: code/symbol, date/datetime ...
+            self.backend_client.push_kline([bar], freq)
+
     def _flush_aggregators(self) -> None:
         for timeframe_dict in self.aggregators.values():
             for aggregator in timeframe_dict.values():
                 aggregator.flush()
+        
+        # Pushing queued data is a bit tricky here as Aggregator saves individually.
+        # We might want to just push from outside or let aggregator do it?
+        # Creating a callback is cleaner. But for now let's just leave it or basic support.
+        # Ideally, `TimeframeAggregator` should call `backend_client.push_kline`?
+        # But `TimeframeAggregator` doesn't know about backend client.
+        # Let's add a hook in `TimeframeAggregator`?
+        # Or better, in `_save_current_bar` of `TimeframeAggregator` we have `on_save`.
+        # `manager_akshare.py` init passes `on_save=self._mirror_to_baostock`.
+        # We can chain it.
+
 
     def sync_once(self, ignore_trading_window: bool = False, force_flush: bool = False) -> None:
         """

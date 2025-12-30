@@ -36,29 +36,14 @@ akshare:
   mirror_to_baostock: true    # 将 akshare 分钟线以临时数据写入 baostock.minute_5，待官方数据覆盖
   force_ipv4: true            # 避免 IPv6 路由被拦截，强制东财走 IPv4
 
-# stock_middle_platform_backend 配置
-stock_middle_platform_backend:
-  base_url: "http://localhost:8000/api/v1"
-  login_path: "/auth/login"
-  basic_path: "/stocks/basic"
-  kline_path: "/stocks/kline"
-  indicator_path: "/indicators/records"
-  username: "please-set-me"
-  password: "please-set-me"
-  verify_ssl: true
-  timeout: 10
-  batch_size: 500
-  token_field: "token"
-  token_prefix: "Bearer"
-  token_header: "Authorization"
-  provider: "astock-sync"
-  basic_target: "primary"
-  kline_target: "primary"
-  indicator_target: "primary"
-  industry_metrics:
-    lookback_days: 12
-    momentum_period: 5
-    industry_limit: 28
+# Backend synchronization configuration
+backend:
+  enabled: true
+  url: "http://localhost:8000"
+  api_prefix: "/api/v1"
+  username: "admin"
+  password: "123456"
+  target: "primary"
 
 # workflow 配置
 workflow:

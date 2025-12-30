@@ -25,8 +25,9 @@ class IndicatorJob:
 class IndicatorEngine:
     """Lightweight indicator calculator that writes results back to MongoDB."""
 
-    def __init__(self, config_path: str = "config.yaml", collection_name: Optional[str] = None) -> None:
+    def __init__(self, config_path: str = "config.yaml", collection_name: Optional[str] = None, backend_client: Optional[Any] = None) -> None:
         self.config = load_config(config_path)
+        self.backend_client = backend_client
         mongo_cfg = self.config["mongodb"]
         baostock_cfg = self.config["baostock"]
 
@@ -112,6 +113,7 @@ class IndicatorEngine:
             return
 
         operations: List[UpdateOne] = []
+        backend_records: List[Dict[str, Any]] = []
         for _, row in series.iterrows():
             dt_value: datetime = row["date"]
             payload = {
@@ -131,6 +133,7 @@ class IndicatorEngine:
                 "payload": {"frequency": job.frequency, "source": "baostock"},
                 "tags": ["technical", "macd"],
             }
+            backend_records.append(payload)
             operations.append(
                 UpdateOne(
                     {
@@ -150,6 +153,9 @@ class IndicatorEngine:
 
         self.indicator_col.bulk_write(operations, ordered=False)
         print(f"[MACD] {job.symbol} wrote {len(operations)} rows into {self.indicator_col.name}.")
+        
+        if self.backend_client:
+            self.backend_client.push_indicators(backend_records)
 
     def _load_price_series(
         self,

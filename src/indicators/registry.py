@@ -8,6 +8,7 @@ from .industry_breadth import IndustryBreadthCalculator
 from .industry_metrics import IndustryMetricsCollector
 from .technical_engine import IndicatorEngine
 from ..utils.config_loader import load_config
+from ..utils.backend_client import BackendClient
 
 
 def _ensure_indicator_index(collection: Collection) -> None:
@@ -18,8 +19,9 @@ def _ensure_indicator_index(collection: Collection) -> None:
     )
 
 
-def _upsert_indicator_records(collection: Collection, records: Iterable[Dict[str, Any]]) -> int:
+def _upsert_indicator_records(collection: Collection, records: Iterable[Dict[str, Any]], backend_client: Optional[BackendClient] = None) -> int:
     ops: List[UpdateOne] = []
+    push_list: List[Dict[str, Any]] = []
     count = 0
     for doc in records:
         if not doc:
@@ -39,6 +41,11 @@ def _upsert_indicator_records(collection: Collection, records: Iterable[Dict[str
                 upsert=True,
             )
         )
+        push_list.append(doc)
+    
+    if backend_client and push_list:
+        backend_client.push_indicators(push_list)
+        
     if not ops:
         return 0
     result = collection.bulk_write(ops, ordered=False)
@@ -50,6 +57,7 @@ def run_indicator_suite(
     config_path: str = "config.yaml",
     jobs: Optional[Sequence[Dict[str, Any]]] = None,
     dry_run: bool = False,
+    backend_client: Optional[BackendClient] = None
 ) -> None:
     """
     Run all configured indicators after data sync:
@@ -88,7 +96,7 @@ def run_indicator_suite(
     try:
         # 1) Technical indicators (e.g., MACD) driven by jobs
         if technical_jobs:
-            engine = IndicatorEngine(config_path=config_path, collection_name=indicator_collection_name)
+            engine = IndicatorEngine(config_path=config_path, collection_name=indicator_collection_name, backend_client=backend_client)
             try:
                 engine.run_jobs(technical_jobs)
             finally:
@@ -109,7 +117,7 @@ def run_indicator_suite(
             collector = IndustryMetricsCollector(**metrics_kwargs)
             metric_records = collector.collect()
             if metric_records:
-                written = _upsert_indicator_records(indicator_col, metric_records)
+                written = _upsert_indicator_records(indicator_col, metric_records, backend_client=backend_client)
                 print(f"[Indicator] industry_metrics upserted {written} records into {indicator_collection_name}.")
             else:
                 print("[Indicator] industry_metrics produced no records; skipped.")
@@ -128,7 +136,7 @@ def run_indicator_suite(
             try:
                 breadth_records = breadth.collect()
                 if breadth_records:
-                    written = _upsert_indicator_records(indicator_col, breadth_records)
+                    written = _upsert_indicator_records(indicator_col, breadth_records, backend_client=backend_client)
                     print(f"[Indicator] industry_breadth upserted {written} records into {indicator_collection_name}.")
                 else:
                     print("[Indicator] industry_breadth produced no records; skipped.")

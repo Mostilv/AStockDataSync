@@ -190,7 +190,7 @@ def compute_backfill_flags(manager: BaostockManager, planner: TradeCalendarHelpe
     return flags
 
 
-def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False) -> None:
+def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
     bs_job_cfg = daily_cfg.get("baostock", {}) or {}
     refresh_basic = bool(daily_cfg.get("refresh_basic", True))
     full_update = bool(bs_job_cfg.get("full_update", False))
@@ -204,7 +204,7 @@ def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: b
     tagging_cfg = daily_cfg.get("tagging", {}) or {}
     include_industry = bool(tagging_cfg.get("industry", True))
 
-    with BaostockManager(config_path=config_path) as manager:
+    with BaostockManager(config_path=config_path, backend_client=backend_client) as manager:
         planner = TradeCalendarHelper()
         backfill_flags = compute_backfill_flags(manager, planner)
         frequencies = resolve_frequencies(base_frequencies, schedule_cfg, planner, backfill_flags=backfill_flags)
@@ -235,7 +235,7 @@ def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: b
         )
 
 
-def run_akshare_job(config_path: str, daily_cfg: Dict, dry_run: bool = False) -> None:
+def run_akshare_job(config_path: str, daily_cfg: Dict, dry_run: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
     ak_cfg = daily_cfg.get("akshare", {}) or {}
     if not ak_cfg.get("enabled", False):
         return
@@ -251,20 +251,20 @@ def run_akshare_job(config_path: str, daily_cfg: Dict, dry_run: bool = False) ->
         )
         return
 
-    with AkshareRealtimeManager(config_path=config_path) as manager:
+    with AkshareRealtimeManager(config_path=config_path, backend_client=backend_client) as manager:
         if loop_mode:
             manager.run_loop(iterations=iterations, ignore_trading_window=ignore_hours)
         else:
             manager.sync_once(ignore_trading_window=ignore_hours, force_flush=True)
 
 
-def run_indicator_jobs(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False) -> None:
+def run_indicator_jobs(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
     indicator_cfg = daily_cfg.get("indicators", {}) or {}
     if not indicator_cfg.get("enabled", True):
         return
 
     jobs = indicator_cfg.get("jobs") or []
-    run_indicator_suite(config_path=config_path, jobs=jobs, dry_run=dry_run)
+    run_indicator_suite(config_path=config_path, jobs=jobs, dry_run=dry_run, backend_client=backend_client)
 
 
 def main() -> None:
@@ -275,9 +275,19 @@ def main() -> None:
     if args.skip_sync:
         print("[Skip Sync] Only running indicator jobs.")
     else:
-        run_baostock_job(config_path, config, daily_cfg, dry_run=args.dry_run)
-        run_akshare_job(config_path, daily_cfg, dry_run=args.dry_run)
-    run_indicator_jobs(config_path, config, daily_cfg, dry_run=args.dry_run)
+        # Initialize backend client
+        from src.utils.backend_client import BackendClient
+        backend_client = BackendClient(config)
+        
+        run_baostock_job(config_path, config, daily_cfg, dry_run=args.dry_run, backend_client=backend_client)
+        run_akshare_job(config_path, daily_cfg, dry_run=args.dry_run, backend_client=backend_client)
+    
+    # We re-init or pass it? Better pass it.
+    if "backend_client" not in locals():
+        from src.utils.backend_client import BackendClient
+        backend_client = BackendClient(config)
+
+    run_indicator_jobs(config_path, config, daily_cfg, dry_run=args.dry_run, backend_client=backend_client)
 
 
 if __name__ == "__main__":

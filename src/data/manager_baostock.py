@@ -12,6 +12,7 @@ from pymongo.errors import BulkWriteError
 from tqdm import tqdm
 
 from ..utils.config_loader import load_config
+from ..utils.backend_client import BackendClient
 
 START_DATE = "2014-01-01"
 MINUTE_START_DATE = "2019-01-02"
@@ -96,8 +97,9 @@ class DailyRateLimiter:
 class BaostockManager:
     """Encapsulates Baostock data synchronization against MongoDB."""
 
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = "config.yaml", backend_client: Optional[BackendClient] = None):
         self.config = load_config(config_path)
+        self.backend_client = backend_client
 
         mongo_cfg = self.config["mongodb"]
         baostock_cfg = self.config["baostock"]
@@ -250,6 +252,8 @@ class BaostockManager:
                     upsert=True,
                 )
             print(f"股票基本信息更新完成，共处理 {len(stock_list)} 条记录。")
+            if self.backend_client:
+                self.backend_client.push_stock_basic(stock_list)
 
     def refresh_industry_and_concepts(
         self,
@@ -470,6 +474,8 @@ class BaostockManager:
                         tqdm.write(
                             f"{code} {freq} 数据更新 {len(data_list)} 条，最新日期 {new_last_date}"
                         )
+                        if self.backend_client:
+                             self.backend_client.push_kline(data_list, freq)
                     pbar.update(1)
 
     def sync_limit_up_minute_data(
@@ -535,6 +541,8 @@ class BaostockManager:
                             {"$set": {settings["field"]: new_last_date}},
                             upsert=True,
                         )
+                        if self.backend_client:
+                            self.backend_client.push_kline(data_list, freq)
                     pbar.update(1)
 
     def update_stock_k_data(self, full_update: bool = False) -> None:
