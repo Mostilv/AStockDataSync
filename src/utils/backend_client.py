@@ -18,9 +18,10 @@ class BackendClient:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        backend_cfg = config.get("backend", {})
+        # Support both 'stock_middle_platform_backend' (new) and legacy 'backend' keys
+        backend_cfg = config.get("stock_middle_platform_backend", config.get("backend", {}))
         self.enabled = bool(backend_cfg.get("enabled", False))
-        self.base_url = backend_cfg.get("url", "http://localhost:8000").rstrip("/")
+        self.base_url = backend_cfg.get("base_url", backend_cfg.get("url", "http://localhost:8000")).rstrip("/")
         self.username = backend_cfg.get("username", "")
         self.password = backend_cfg.get("password", "")
         self.api_prefix = backend_cfg.get("api_prefix", "/api/v1")
@@ -96,20 +97,28 @@ class BackendClient:
             self._ensure_auth()
             url = f"{self.base_url}{self.api_prefix}/stocks/basic"
             
-            # Adapt loop
+            # Adapt Akshare stock_basic format to backend schema
             adapted_items = []
             for item in items:
-                # Baostock: code, code_name, ipoDate, outDate, type, status
-                # Backend: symbol, name, exchange, list_date, ...
+                # Akshare: code, code_name, source
+                # Backend: symbol, name, exchange, ...
+                code = item.get("code", "")
                 try:
+                    # Determine exchange from code prefix
+                    if code.startswith("6"):
+                        exchange = "SH"
+                    elif code.startswith(("0", "3")):
+                        exchange = "SZ"
+                    elif code.startswith(("4", "8")):
+                        exchange = "BJ"
+                    else:
+                        exchange = ""
                     adapted_items.append({
-                        "symbol": item.get("code"),  # e.g. sh.600000
+                        "symbol": code,
                         "name": item.get("code_name"),
-                        "exchange": item.get("code", "")[:2].upper(), # sh/sz
-                        "list_date": item.get("ipoDate") or None,
-                        "delist_date": item.get("outDate") or None,
-                        "status": "active" if item.get("status") == "1" else "delisted",
-                        "type": "stock" if item.get("type") == "1" else "index", # 1=stock, 2=index
+                        "exchange": exchange,
+                        "status": "active",
+                        "type": "stock",
                         "payload": item
                     })
                 except Exception:
@@ -162,41 +171,22 @@ class BackendClient:
 
             adapted_items = []
             for k in kline_list:
-                # Baostock: date, code, open, high, low, close, volume, amount, adjustflag, ...
-                # Akshare real: symbol, date, open, high, low, close, volume...
-                
-                # Unify keys
-                # If date and time are separate (minute data in baostock), combine them
-                ts_str = k.get("date")
-                if "time" in k and k["time"]:
-                    # Baostock 5m time format YYYYMMDDHHMMSSssss
-                    # but date is YYYY-MM-DD
-                    # Let's check format.
-                    # manager_baostock.py: fields = "date,time,code..."
-                    # Actually standard baostock returns 14-digit string for time?
-                    # Let's look at manager_baostock.py processing. 
-                    # It just passes dict.
-                    # Simple approach: If 'time' exists and is long, use it as timestamp.
-                    # Else combine date + time if possible.
-                    # Or if akshare, it has 'datetime' object sometimes.
-                    pass
-                
+                # Akshare format: code, date, open, high, low, close, volume, amount, adjustflag
+                # For minute data: code, date, time, open, high, low, close, volume, amount
+
                 # Robust timestamp parsing
                 timestamp = None
-                if isinstance(k.get("datetime"), datetime): 
+                if isinstance(k.get("datetime"), datetime):
                     timestamp = k["datetime"]
-                elif k.get("time") and len(str(k["time"])) > 8:
-                    # e.g. 20200101103000
-                    try: 
-                        t_str = str(k["time"])[:14]
-                        timestamp = datetime.strptime(t_str, "%Y%m%d%H%M%S")
+                elif k.get("date") and k.get("time"):
+                    # Akshare minute data: date="2024-01-02", time="09:30:00"
+                    try:
+                        timestamp = datetime.strptime(f"{k['date']} {k['time']}", "%Y-%m-%d %H:%M:%S")
                     except ValueError:
                         pass
                 elif k.get("date"):
                     try:
                         timestamp = datetime.strptime(k["date"], "%Y-%m-%d")
-                        # For minute bars without full timestamp, this might be issue.
-                        # But Baostock usually provides time field for minutes.
                     except ValueError:
                         pass
                 
@@ -286,3 +276,31 @@ class BackendClient:
 
         except Exception as e:
             logger.error(f"Failed to push indicators: {e}")
+
+    def check_integrity(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Check data integrity against backend.
+        items: List of dict with keys: symbol, frequency, start_date, end_date
+        """
+        if not self.enabled or not items:
+            return []
+
+        try:
+            self._ensure_auth()
+            url = f"{self.base_url}{self.api_prefix}/integrity/check"
+            
+            # Ensure items have date objects serialized or strings
+            # Backend expects strings YYYY-MM-DD or date objects if using jsonable_encoder
+            # Here we manually construct dict.
+            # Backend model needs: symbol, frequency, start_date, end_date
+            
+            payload = {
+                "target": self.target,
+                "items": items
+            }
+            resp = self.session.post(url, json=payload, headers=self.get_headers(), timeout=60)
+            resp.raise_for_status()
+            return resp.json().get("results", [])
+        except Exception as e:
+            logger.error(f"Failed to check integrity: {e}")
+            return []

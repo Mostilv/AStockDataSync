@@ -1,18 +1,18 @@
 import argparse
+import os
 from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import baostock as bs
+import importlib
 
-from src.data.manager_akshare import AkshareRealtimeManager
-from src.data.manager_baostock import BaostockManager
+from src.data.manager_akshare import AkshareManager
 from src.indicators.registry import run_indicator_suite
 from src.utils.config_loader import load_config
 
 DATE_FMT = "%Y-%m-%d"
 TRADE_CAL_LOOKBACK_DAYS = 120
 TRADE_CAL_LOOKAHEAD_DAYS = 10
-DEFAULT_CONFIG_PATH = "config.yaml"
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 
 
 class TradeCalendarHelper:
@@ -91,27 +91,23 @@ class TradeCalendarHelper:
         return None
 
     def _iter_trade_dates(self, start: date, end: date) -> Iterable[Tuple[date, bool]]:
-        rs = bs.query_trade_dates(start.strftime(DATE_FMT), end.strftime(DATE_FMT))
-        if rs.error_code != "0":
-            print(f"Failed to query baostock trade dates: {rs.error_msg}")
-            return []
-        fields = [f.lower() for f in (rs.fields or [])]
-        date_idx = next((i for i, f in enumerate(fields) if "date" in f), 0)
-        open_idx = next(
-            (i for i, f in enumerate(fields) if "isopen" in f or "istrade" in f or "is_trading" in f),
-            1 if len(fields) > 1 else 0,
-        )
-        while rs.next():
-            row = rs.get_row_data()
-            if not row:
-                continue
-            try:
-                raw_date = row[date_idx]
-                is_open_val = row[open_idx] if open_idx < len(row) else (row[1] if len(row) > 1 else "0")
-                day_value = datetime.strptime(raw_date, DATE_FMT).date()
-                yield day_value, str(is_open_val).strip() == "1"
-            except Exception:
-                continue
+        # Using Akshare tool_trade_date_hist_sina
+        try:
+            import akshare as ak
+            trade_df = ak.tool_trade_date_hist_sina()
+            if trade_df is not None and not trade_df.empty:
+                trade_dates_set = set(trade_df["trade_date"].astype(str))
+                
+                # Check each day in the range [start, end]
+                curr = start
+                while curr <= end:
+                    date_str = curr.strftime(DATE_FMT)
+                    is_open = date_str in trade_dates_set
+                    yield curr, is_open
+                    curr += timedelta(days=1)
+        except Exception as e:
+            print(f"Failed to query akshare trade dates: {e}")
+            pass
 
     def _collect_open_dates(self, reference: Optional[date] = None) -> List[date]:
         if self._open_dates:
@@ -137,7 +133,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-sync",
         action="store_true",
-        help="Skip data fetching (baostock/akshare) and only run indicators.",
+        help="Skip data fetching (akshare) and only run indicators.",
+    )
+    parser.add_argument(
+        "--test-validation",
+        action="store_true",
+        help="Force run end-of-day validation immediately",
     )
     return parser.parse_args()
 
@@ -181,7 +182,7 @@ def resolve_frequencies(
     return tuple(resolved)
 
 
-def compute_backfill_flags(manager: BaostockManager, planner: TradeCalendarHelper) -> Dict[str, bool]:
+def compute_backfill_flags(manager: AkshareManager, planner: TradeCalendarHelper) -> Dict[str, bool]:
     flags: Dict[str, bool] = {}
     expected_week = planner.expected_weekly_close()
     expected_month = planner.expected_monthly_close()
@@ -190,72 +191,67 @@ def compute_backfill_flags(manager: BaostockManager, planner: TradeCalendarHelpe
     return flags
 
 
-def run_baostock_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
-    bs_job_cfg = daily_cfg.get("baostock", {}) or {}
+def run_akshare_job(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False, test_validation: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
+    ak_cfg = daily_cfg.get("akshare", {}) or {}
+    if not ak_cfg.get("enabled", False):
+        return
+
     refresh_basic = bool(daily_cfg.get("refresh_basic", True))
-    full_update = bool(bs_job_cfg.get("full_update", False))
-    resume = bool(bs_job_cfg.get("resume", True))
-    lookback_years = bs_job_cfg.get("lookback_years", config.get("baostock", {}).get("history_years"))
-    lookback_years = int(lookback_years) if lookback_years is not None else None
-    schedule_cfg = bs_job_cfg.get("schedule", {}) or {}
-    base_frequencies = bs_job_cfg.get("frequencies") or config.get("baostock", {}).get(
-        "frequencies", ["d", "w", "m", "5"]
-    )
+    loop_mode = bool(ak_cfg.get("loop_mode", False))
+    full_update = bool(ak_cfg.get("full_update", False))
+    resume = bool(ak_cfg.get("resume", True))
+    lookback_years = int(ak_cfg.get("lookback_years", 3))
+    
+    schedule_cfg = ak_cfg.get("schedule", {}) or {}
+    base_frequencies = ak_cfg.get("frequencies", ["d", "w", "m", "5"])
+    
     tagging_cfg = daily_cfg.get("tagging", {}) or {}
     include_industry = bool(tagging_cfg.get("industry", True))
 
-    with BaostockManager(config_path=config_path, backend_client=backend_client) as manager:
+    with AkshareManager(config_path=config_path, backend_client=backend_client) as manager:
         planner = TradeCalendarHelper()
         backfill_flags = compute_backfill_flags(manager, planner)
         frequencies = resolve_frequencies(base_frequencies, schedule_cfg, planner, backfill_flags=backfill_flags)
 
         if dry_run:
             print(
-                f"[Dry Run] baostock sync -> refresh_basic={refresh_basic}, "
+                f"[Dry Run] akshare sync -> refresh_basic={refresh_basic}, "
                 f"frequencies={frequencies}, full_update={full_update}, "
                 f"resume={resume}, lookback_years={lookback_years}, "
-                f"industry_tag={include_industry}"
+                f"loop_mode={loop_mode}"
             )
             return
-
+        
+        # 1. Base Initialization (Historical Backfill)
+        print("--- [1] 初始化检查与基础数据载入 ---")
         if refresh_basic:
-            manager.query_stock_basic(refresh=False)
-        if include_industry:
-            manager.refresh_industry_and_concepts(include_industry=include_industry)
+            manager.query_stock_basic()
 
-        if not frequencies:
-            print("No baostock K-line frequency scheduled today; skipping K-line sync.")
-            return
-
-        manager.sync_k_data(
-            frequencies=frequencies,
-            full_update=full_update,
-            lookback_years=lookback_years,
-            resume=resume,
-        )
-
-
-def run_akshare_job(config_path: str, daily_cfg: Dict, dry_run: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
-    ak_cfg = daily_cfg.get("akshare", {}) or {}
-    if not ak_cfg.get("enabled", False):
-        return
-
-    loop_mode = bool(ak_cfg.get("loop_mode", False))
-    iterations = ak_cfg.get("iterations")
-    ignore_hours = bool(ak_cfg.get("ignore_hours", False))
-
-    if dry_run:
-        print(
-            f"[Dry Run] akshare realtime -> loop_mode={loop_mode}, iterations={iterations}, "
-            f"ignore_trading_window={ignore_hours}"
-        )
-        return
-
-    with AkshareRealtimeManager(config_path=config_path, backend_client=backend_client) as manager:
+        if frequencies:
+            # This triggers historical fallback if data is missing, otherwise it uses fast spot/minute endpoints
+            manager.sync_k_data(
+                frequencies=frequencies,
+                full_update=full_update,
+                lookback_years=lookback_years,
+                resume=resume,
+            )
+        
+        # 2. End-of-Day Validation
+        now = datetime.now()
+        eod_hour = int(ak_cfg.get("eod_validation_hour", 20))
+        # If it's past validation hour and we haven't done it recently, run historical backfill to validate/fix the daily bars
+        if test_validation or now.hour >= eod_hour:
+            print(f"--- [2] 触发盘后清算校验 (>= {eod_hour}:00) ---")
+            manager.run_validation(frequencies=frequencies)
+        
+        # 3. Continuous Syncing (Intraday Polling)
         if loop_mode:
-            manager.run_loop(iterations=iterations, ignore_trading_window=ignore_hours)
+            print("--- [3] 进入盘中实时快照轮询机制 ---")
+            interval = int(ak_cfg.get("loop_interval_minutes", 30))
+            manager.run_loop(interval_minutes=interval, indicator_trigger=lambda: run_indicator_jobs(config_path, config, daily_cfg, False, backend_client))
         else:
-            manager.sync_once(ignore_trading_window=ignore_hours, force_flush=True)
+            print("--- [3] (单次快照更新) ---")
+            manager.sync_once()
 
 
 def run_indicator_jobs(config_path: str, config: Dict, daily_cfg: Dict, dry_run: bool = False, backend_client: Optional["BackendClient"] = None) -> None:
@@ -279,8 +275,7 @@ def main() -> None:
         from src.utils.backend_client import BackendClient
         backend_client = BackendClient(config)
         
-        run_baostock_job(config_path, config, daily_cfg, dry_run=args.dry_run, backend_client=backend_client)
-        run_akshare_job(config_path, daily_cfg, dry_run=args.dry_run, backend_client=backend_client)
+        run_akshare_job(config_path, config, daily_cfg, dry_run=args.dry_run, test_validation=args.test_validation, backend_client=backend_client)
     
     # We re-init or pass it? Better pass it.
     if "backend_client" not in locals():

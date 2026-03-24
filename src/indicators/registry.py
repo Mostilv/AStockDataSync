@@ -71,9 +71,9 @@ def run_indicator_suite(
     if not indicator_cfg.get("enabled", True):
         return
 
-    baostock_cfg = config.get("baostock", {}) or {}
-    mongo_cfg = config.get("mongodb", {}) or {}
-    indicator_collection_name = baostock_cfg.get("indicator_collection", "indicator_data")
+    akshare_cfg = config.get("akshare", {}) or {}
+    indicator_cfg = config.get("workflow", {}).get("daily_update", {}).get("indicators", {})
+    indicator_collection_name = akshare_cfg.get("indicator_collection", "indicator_data")
     run_industry_metrics = indicator_cfg.get("run_industry_metrics", True)
     run_industry_breadth = indicator_cfg.get("run_industry_breadth", True)
     technical_jobs = list(jobs or indicator_cfg.get("jobs") or [])
@@ -89,7 +89,7 @@ def run_indicator_suite(
         return
 
     client = MongoClient(mongo_cfg.get("uri", "mongodb://localhost:27017/"))
-    db = client.get_database(baostock_cfg.get("db", "baostock"))
+    db = client.get_database(akshare_cfg.get("db", "akshare_data"))
     indicator_col = db[indicator_collection_name]
     _ensure_indicator_index(indicator_col)
 

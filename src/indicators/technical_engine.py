@@ -29,17 +29,18 @@ class IndicatorEngine:
         self.config = load_config(config_path)
         self.backend_client = backend_client
         mongo_cfg = self.config["mongodb"]
-        baostock_cfg = self.config["baostock"]
-
+        akshare_cfg = self.config.get("akshare", {})
+        
         self.client = MongoClient(mongo_cfg["uri"])
-        self.db = self.client[baostock_cfg["db"]]
-        indicator_collection = collection_name or baostock_cfg.get("indicator_collection", "indicator_data")
+        self.db = self.client[akshare_cfg.get("db", "akshare_data")]
+        indicator_collection = collection_name or akshare_cfg.get("indicator_collection", "indicator_data")
         self.indicator_col = self.db[indicator_collection]
-        self.kline_collections: Dict[str, Collection] = {
-            "d": self.db[baostock_cfg["daily"]],
-            "w": self.db[baostock_cfg.get("weekly", "weekly_adjusted")],
-            "m": self.db[baostock_cfg.get("monthly", "monthly_adjusted")],
-            "5": self.db[baostock_cfg["minute_5"]],
+        
+        self.collections: Dict[str, Collection] = {
+            "d": self.db[akshare_cfg.get("daily", "daily_adjusted")],
+            "w": self.db[akshare_cfg.get("weekly", "weekly_adjusted")],
+            "m": self.db[akshare_cfg.get("monthly", "monthly_adjusted")],
+            "5": self.db[akshare_cfg.get("minute_5", "minute_5_adjusted")],
         }
         self._ensure_indexes()
         self._handlers = {"macd": self._run_macd_job}
@@ -130,7 +131,7 @@ class IndicatorEngine:
                     "slow": slow,
                     "signal_period": signal,
                 },
-                "payload": {"frequency": job.frequency, "source": "baostock"},
+                "payload": {"frequency": job.frequency, "source": "akshare"},
                 "tags": ["technical", "macd"],
             }
             backend_records.append(payload)

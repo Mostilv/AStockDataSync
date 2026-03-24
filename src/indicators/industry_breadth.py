@@ -29,7 +29,6 @@ class IndustryBreadthCalculator:
         self.config_path = config_path
         self.config = load_config(config_path)
         mongo_cfg = self.config["mongodb"]
-        baostock_cfg = self.config["baostock"]
         backend_cfg = self.config.get("stock_middle_platform_backend", {}) or {}
         breadth_cfg = backend_cfg.get("industry_breadth", {}) or {}
 
@@ -37,13 +36,23 @@ class IndustryBreadthCalculator:
         self.timeframe = (timeframe or breadth_cfg.get("timeframe") or "1d").strip().lower()
         self.lookback_days = int(lookback_days or breadth_cfg.get("lookback_days") or 30)
         self.ma_window = int(ma_window or breadth_cfg.get("ma_window") or 20)
-        self.collection_name = (collection_name or breadth_cfg.get("collection") or "indicator_data").strip()
         self.save_local = bool(save_local if save_local is not None else breadth_cfg.get("save_local", True))
 
-        self.client = MongoClient(mongo_cfg["uri"])
-        self.db = self.client[baostock_cfg["db"]]
-        self.daily_col = self.db[baostock_cfg["daily"]]
-        self.basic_col = self.db[baostock_cfg["basic"]]
+        akshare_cfg = self.config.get("akshare", {})
+        
+        self.mongo_uri = mongo_cfg.get("uri", "mongodb://localhost:27017/")
+        self.client = MongoClient(self.mongo_uri)
+        
+        # Determine target collection for indicator results
+        target_col_name = collection_name
+        if not target_col_name:
+            workflow_cfg = self.config.get("workflow", {}).get("daily_update", {}).get("indicators", {})
+            target_col_name = workflow_cfg.get("collection", "indicator_data")
+        self.collection_name = (target_col_name or breadth_cfg.get("collection") or "indicator_data").strip()
+        
+        self.db = self.client[akshare_cfg.get("db", "akshare_data")]
+        self.daily_col = self.db[akshare_cfg.get("daily", "daily_adjusted")]
+        self.basic_col = self.db[akshare_cfg.get("basic", "stock_basic")]
         self.indicator_col = self.db[self.collection_name]
 
     def close(self) -> None:

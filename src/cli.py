@@ -1,64 +1,55 @@
 import argparse
+import sys
 import os
 import time
-from typing import Callable
+from datetime import datetime
+from typing import Callable, List, Optional
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-from .data.manager_akshare import AkshareRealtimeManager
+from .data.manager_akshare import AkshareManager
 from .data.manager_backend import StockMiddlePlatformBackendSync
-from .data.manager_baostock import BaostockManager
-
-
-def handle_baostock(args: argparse.Namespace) -> None:
-    """Dispatch tasks that rely on the BaostockManager."""
-    manager = BaostockManager(config_path=args.config)
-    try:
-        if args.action == "basic":
-            manager.query_stock_basic(refresh=args.refresh)
-        elif args.action == "kline":
-            manager.sync_k_data(
-                frequencies=args.frequencies,
-                full_update=args.full,
-                lookback_years=args.years,
-                resume=args.resume,
-            )
-        elif args.action == "limitup-minutes":
-            manager.sync_limit_up_minute_data(
-                days=args.limitup_days,
-                frequencies=tuple(args.minute_frequencies or ("5",)),
-                pct_threshold=args.pct_threshold,
-            )
-        elif args.action == "finance":
-            manager.sync_finance_data(
-                full_update=args.full,
-                years=args.years,
-                resume=args.resume,
-            )
-        else:
-            raise ValueError(f"Unsupported Baostock action: {args.action}")
-    finally:
-        manager.close()
+from .indicators.industry_breadth import IndustryBreadthCalculator
 
 
 def handle_akshare(args: argparse.Namespace) -> None:
-    """Dispatch Akshare realtime routines."""
-    manager = AkshareRealtimeManager(config_path=args.config)
-    try:
-        if args.action == "once":
-            manager.sync_once(
-                ignore_trading_window=args.ignore_hours,
-                force_flush=args.force_flush,
+    config_path = args.config
+    with AkshareManager(config_path=config_path) as manager:
+        if args.command == "basic":
+            print("初始化股票列表 (stock_zh_a_spot_em)")
+            manager.query_stock_basic()
+            print("基础信息更新完毕。")
+            return
+
+        elif args.command == "kline":
+            if not args.frequencies:
+                print("请指定至少一个频率，例如 -f d w")
+                return
+            manager.sync_k_data(
+                frequencies=args.frequencies,
+                full_update=args.full_update,
+                lookback_years=args.lookback_years,
+                resume=not args.no_resume,
             )
-        elif args.action == "realtime":
-            manager.run_loop(
-                iterations=args.iterations,
-                ignore_trading_window=args.ignore_hours,
-            )
-        else:
-            raise ValueError(f"Unsupported Akshare action: {args.action}")
-    finally:
-        manager.close()
+            print("历史 K 线同步完毕。")
+            return
+
+        elif args.command == "spot":
+            print(f"抓取一次实时快照 (循环模式: {args.loop})")
+            if args.loop:
+                manager.run_loop(interval_minutes=args.interval)
+            else:
+                manager.sync_once()
+            print("快照获取/更新完毕。")
+            return
+
+        elif args.command == "validation":
+            print("执行盘后历史数据校验...")
+            manager.run_validation(frequencies=args.frequencies or ["d", "w", "m", "5"])
+            print("盘后校验完毕。")
+            return
+
+        print(f"未知的 akshare 子命令: {args.command}")
 
 
 def handle_backend(args: argparse.Namespace) -> None:
@@ -104,9 +95,9 @@ def handle_backend(args: argparse.Namespace) -> None:
 def handle_auto(args: argparse.Namespace) -> None:
     """High-level orchestrator with two modes: sync data, push data."""
     if args.action == "sync":
-        manager = BaostockManager(config_path=args.config)
+        manager = AkshareManager(config_path=args.config)
         try:
-            manager.query_stock_basic(refresh=False)
+            manager.query_stock_basic()
             manager.sync_k_data(
                 frequencies=("d",),
                 full_update=False,
@@ -154,12 +145,9 @@ def handle_auto(args: argparse.Namespace) -> None:
         raise ValueError(f"Unsupported auto action: {args.action}")
 
 
-
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Data maintenance utilities for AStockDataSync (Baostock/Tushare)."
+        description="Data maintenance utilities for AStockDataSync (Akshare)."
     )
     parser.add_argument(
         "--config",
@@ -169,91 +157,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="source", required=True)
 
-    # Baostock commands
-    baostock_parser = subparsers.add_parser("baostock", help="Tasks for Baostock data")
-    baostock_parser.add_argument(
-        "action",
-        choices=["basic", "kline", "finance", "limitup-minutes"],
-        help=(
-            "basic: refresh stock basics; "
-            "kline: update K-line collections; "
-            "finance: quarterly financials; "
-            "limitup-minutes: sync last-week minute bars for limit-up stocks"
-        ),
-    )
-    baostock_parser.add_argument(
-        "--refresh",
-        action="store_true",
-        help="When used with 'basic', force refresh instead of incremental update.",
-    )
-    baostock_parser.add_argument(
-        "--full",
-        action="store_true",
-        help="When used with 'kline', fetch data from START_DATE instead of last record.",
-    )
-    baostock_parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="When initialization stops midway, continue from the last stored progress.",
-    )
-    baostock_parser.add_argument(
-        "--freq",
-        dest="frequencies",
-        action="append",
-        choices=["d", "w", "m", "5"],
-        help="Specify frequencies (repeatable). Defaults to config frequencies.",
-    )
-    baostock_parser.add_argument(
-        "--years",
-        type=int,
-        default=None,
-        help="Custom lookback window for kline/finance operations. Default: config settings.",
-    )
-    baostock_parser.add_argument(
-        "--limitup-days",
-        dest="limitup_days",
-        type=int,
-        default=7,
-        help="Lookback days when action=limitup-minutes (default: 7).",
-    )
-    baostock_parser.add_argument(
-        "--pct-threshold",
-        dest="pct_threshold",
-        type=float,
-        default=9.5,
-        help="Pct change threshold to mark limit-up when action=limitup-minutes (default: 9.5).",
-    )
-    baostock_parser.add_argument(
-        "--minute-freq",
-        dest="minute_frequencies",
-        action="append",
-        choices=["5"],
-        help="Minute frequencies for limit-up sync; repeatable. Default: 5.",
-    )
-    baostock_parser.set_defaults(handler=handle_baostock)
-
     # Akshare commands
-    akshare_parser = subparsers.add_parser("akshare", help="Tasks for Akshare realtime quotes")
+    akshare_parser = subparsers.add_parser("akshare", help="Tasks for Akshare")
     akshare_parser.add_argument(
-        "action",
-        choices=["once", "realtime"],
-        help="once: fetch snapshot once; realtime: keep looping until interrupted.",
+        "command",
+        choices=["basic", "kline", "spot", "validation"],
+        help="Command to run.",
     )
     akshare_parser.add_argument(
-        "--ignore-hours",
-        action="store_true",
-        help="Allow execution outside regular trading hours.",
+        "-f", "--frequencies", nargs="+", help="Frequencies to sync (d, w, m, 5)."
     )
     akshare_parser.add_argument(
-        "--force-flush",
-        action="store_true",
-        help="Force unfinished timeframe bars to be persisted after a single run.",
+        "--full-update", action="store_true", help="Force a full history fetching instead of resume."
     )
     akshare_parser.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help="Limit realtime loop iterations (default: infinite).",
+        "--no-resume", action="store_true", help="Disable resume capability when fetching history."
+    )
+    akshare_parser.add_argument(
+        "--lookback-years", type=int, default=3, help="Years of history to fetch."
+    )
+    akshare_parser.add_argument(
+        "--loop", action="store_true", help="Running spot fetch in a loop."
+    )
+    akshare_parser.add_argument(
+        "--interval", type=int, default=30, help="Loop interval in minutes."
     )
     akshare_parser.set_defaults(handler=handle_akshare)
 

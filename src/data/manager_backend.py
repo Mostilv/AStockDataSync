@@ -35,9 +35,9 @@ class StockMiddlePlatformBackendSync:
 
         self.backend_cfg = backend_cfg
         self.base_url = backend_cfg["base_url"].rstrip("/")
-        self.login_path = backend_cfg.get("login_path", "/api/auth/login")
-        self.basic_path = backend_cfg.get("basic_path", "/api/stocks/basic")
-        self.kline_path = backend_cfg.get("kline_path", "/api/stocks/kline")
+        self.login_path = backend_cfg.get("login_path", "/api/v1/auth/login")
+        self.basic_path = backend_cfg.get("basic_path", "/api/v1/stocks/basic")
+        self.kline_path = backend_cfg.get("kline_path", "/api/v1/stocks/kline")
         self.timeout = float(backend_cfg.get("timeout", 10))
         self.verify_ssl = bool(backend_cfg.get("verify_ssl", True))
         self.batch_size = int(backend_cfg.get("batch_size", 500) or 500)
@@ -52,7 +52,7 @@ class StockMiddlePlatformBackendSync:
         self.basic_target = backend_cfg.get("basic_target", "primary")
         self.kline_target = backend_cfg.get("kline_target", "primary")
         self.indicator_target = backend_cfg.get("indicator_target", "primary")
-        self.indicator_path = backend_cfg.get("indicator_path", "/api/indicators/records")
+        self.indicator_path = backend_cfg.get("indicator_path", "/api/v1/indicators/records")
         self.indicator_provider = backend_cfg.get("indicator_provider", self.provider)
         self.industry_metrics_cfg = backend_cfg.get("industry_metrics", {}) or {}
         # industry_breadth is optional; if missing, defaults are applied in the calculator.
@@ -61,18 +61,18 @@ class StockMiddlePlatformBackendSync:
         mongo_cfg = self.config.get("mongodb")
         if not mongo_cfg:
             raise BackendSyncError("缺少 mongodb 配置。")
-        baostock_cfg = self.config.get("baostock")
-        if not baostock_cfg:
-            raise BackendSyncError("缺少 baostock 配置。")
+        akshare_cfg = self.config.get("akshare")
+        if not akshare_cfg:
+            raise BackendSyncError("缺少 akshare 配置。")
 
         self.mongo_client = MongoClient(mongo_cfg["uri"])
-        baostock_db = self.mongo_client[baostock_cfg["db"]]
-        self.basic_collection = baostock_db[baostock_cfg["basic"]]
+        akshare_db = self.mongo_client[akshare_cfg.get("db", "akshare_data")]
+        self.basic_collection = akshare_db[akshare_cfg.get("basic", "stock_basic")]
         self.kline_collections: Dict[str, Collection] = {
-            "d": baostock_db[baostock_cfg["daily"]],
-            "w": baostock_db[baostock_cfg.get("weekly", "weekly_adjusted")],
-            "m": baostock_db[baostock_cfg.get("monthly", "monthly_adjusted")],
-            "5": baostock_db[baostock_cfg["minute_5"]],
+            "d": akshare_db[akshare_cfg.get("daily", "daily_adjusted")],
+            "w": akshare_db[akshare_cfg.get("weekly", "weekly_adjusted")],
+            "m": akshare_db[akshare_cfg.get("monthly", "monthly_adjusted")],
+            "5": akshare_db[akshare_cfg.get("minute_5", "minute_5_adjusted")],
         }
 
         self.session = requests.Session()
@@ -316,8 +316,8 @@ class StockMiddlePlatformBackendSync:
             "symbol": symbol,
             "name": document.get("code_name") or document.get("name") or symbol,
             "exchange": symbol[:2],
-            "list_date": self._parse_date_field(document.get("ipoDate")),
-            "delist_date": self._parse_date_field(document.get("outDate")),
+            "list_date": self._parse_date_field(document.get("ipoDate") or document.get("list_date")),
+            "delist_date": self._parse_date_field(document.get("outDate") or document.get("delist_date")),
             "status": document.get("status"),
             "type": document.get("type"),
             "market": document.get("market"),
@@ -336,7 +336,7 @@ class StockMiddlePlatformBackendSync:
             return None
         symbol = self._normalize_symbol(raw_code)
         try:
-            trade_date = self._normalize_date(document.get("date"))
+            trade_date = self._normalize_date(str(document.get("date")))
         except BackendSyncError:
             return None
         if not symbol or not trade_date:
@@ -405,7 +405,7 @@ class StockMiddlePlatformBackendSync:
             return None
         try:
             return self._normalize_date(str(value))
-        except BackendSyncError:
+        except Exception:
             return None
 
     def _combine_timestamp(
