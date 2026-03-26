@@ -14,6 +14,7 @@ from pymongo.database import Database
 class MongoCollections:
     stock_basic: str = "stock_basic"
     stock_kline: str = "stock_kline"
+    stock_fundamental: str = "stock_fundamental"
     sync_meta: str = "sync_meta"
 
 
@@ -41,6 +42,10 @@ class MongoStorage:
         return self.database[self.collections.stock_kline]
 
     @property
+    def stock_fundamental_collection(self) -> Collection:
+        return self.database[self.collections.stock_fundamental]
+
+    @property
     def sync_meta_collection(self) -> Collection:
         return self.database[self.collections.sync_meta]
 
@@ -61,6 +66,17 @@ class MongoStorage:
             self.stock_kline_collection,
             [("symbol", ASCENDING), ("frequency", ASCENDING), ("trade_date", ASCENDING)],
             name="symbol_frequency_trade_date_idx",
+        )
+        self._safe_create_index(
+            self.stock_fundamental_collection,
+            [("symbol", ASCENDING), ("report_date", ASCENDING)],
+            unique=True,
+            name="symbol_report_date_unique",
+        )
+        self._safe_create_index(
+            self.stock_fundamental_collection,
+            [("report_date", ASCENDING), ("industry", ASCENDING)],
+            name="report_date_industry_idx",
         )
         self._safe_create_index(
             self.sync_meta_collection,
@@ -109,6 +125,30 @@ class MongoStorage:
             )
         return self._bulk_write(self.stock_kline_collection, operations)
 
+    def upsert_stock_fundamental(
+        self,
+        records: Iterable[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        operations: List[UpdateOne] = []
+        now = datetime.utcnow()
+        for record in records:
+            symbol = record.get("symbol")
+            report_date = record.get("report_date")
+            if not symbol or not report_date:
+                continue
+            document = {**record, "updated_at": now}
+            operations.append(
+                UpdateOne(
+                    {
+                        "symbol": symbol,
+                        "report_date": report_date,
+                    },
+                    {"$set": document, "$setOnInsert": {"created_at": now}},
+                    upsert=True,
+                )
+            )
+        return self._bulk_write(self.stock_fundamental_collection, operations)
+
     def update_sync_meta(self, task: str, scope: str, payload: Dict[str, Any]) -> None:
         self.sync_meta_collection.update_one(
             {"task": task, "scope": scope},
@@ -132,6 +172,44 @@ class MongoStorage:
         if limit:
             cursor = cursor.limit(limit)
         return [item["symbol"] for item in cursor if item.get("symbol")]
+
+    def get_latest_kline_timestamps(
+        self,
+        *,
+        symbols: List[str],
+        frequency: str,
+    ) -> Dict[str, datetime]:
+        if not symbols:
+            return {}
+        pipeline = [
+            {
+                "$match": {
+                    "symbol": {"$in": symbols},
+                    "frequency": frequency,
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$symbol",
+                    "latest_timestamp": {"$max": "$timestamp"},
+                }
+            },
+        ]
+        rows = list(self.stock_kline_collection.aggregate(pipeline))
+        return {
+            row["_id"]: row["latest_timestamp"]
+            for row in rows
+            if row.get("_id") and row.get("latest_timestamp")
+        }
+
+    def delete_kline_older_than(self, *, frequency: str, cutoff: datetime) -> int:
+        result = self.stock_kline_collection.delete_many(
+            {
+                "frequency": frequency,
+                "timestamp": {"$lt": cutoff},
+            }
+        )
+        return int(getattr(result, "deleted_count", 0))
 
     def close(self) -> None:
         self.client.close()

@@ -26,11 +26,36 @@ def build_parser() -> argparse.ArgumentParser:
     basic_parser = subparsers.add_parser("basic", help="Sync stock basic data")
     basic_parser.set_defaults(handler=handle_basic)
 
+    fundamental_parser = subparsers.add_parser(
+        "fundamental",
+        help="Sync market-wide fundamental snapshots by report date",
+    )
+    fundamental_parser.add_argument(
+        "--report-date",
+        dest="report_dates",
+        action="append",
+        default=None,
+        help="Quarter report date such as 20241231. Repeatable.",
+    )
+    fundamental_parser.add_argument(
+        "--periods",
+        type=int,
+        default=None,
+        help="How many recent report periods to sync when report dates are omitted.",
+    )
+    fundamental_parser.set_defaults(handler=handle_fundamental)
+
+    fundamental_latest_parser = subparsers.add_parser(
+        "fundamental-latest",
+        help="Sync only the latest report-period fundamentals",
+    )
+    fundamental_latest_parser.set_defaults(handler=handle_fundamental_latest)
+
     kline_parser = subparsers.add_parser("kline", help="Sync K-line data")
     kline_parser.add_argument(
         "--frequency",
         default="d",
-        choices=["d", "w", "m", "5"],
+        choices=["d", "w", "m", "1", "5", "15", "30", "60"],
         help="K-line frequency",
     )
     kline_parser.add_argument(
@@ -62,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--frequency",
         dest="frequencies",
         action="append",
-        choices=["d", "w", "m", "5"],
+        choices=["d", "w", "m", "1", "5", "15", "30", "60"],
         default=None,
         help="Frequency to maintain. Repeatable. Defaults to config values.",
     )
@@ -90,6 +115,31 @@ def handle_basic(args: argparse.Namespace) -> None:
     service.initialize()
     try:
         summary = service.sync_stock_basic()
+        print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2, default=str))
+    finally:
+        service.close()
+
+
+def handle_fundamental(args: argparse.Namespace) -> None:
+    config = load_runtime_config(args.config)
+    service = RawDataSyncService(config)
+    service.initialize()
+    try:
+        summary = service.sync_fundamentals(
+            report_dates=args.report_dates,
+            periods=args.periods,
+        )
+        print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2, default=str))
+    finally:
+        service.close()
+
+
+def handle_fundamental_latest(args: argparse.Namespace) -> None:
+    config = load_runtime_config(args.config)
+    service = RawDataSyncService(config)
+    service.initialize()
+    try:
+        summary = service.sync_fundamentals(periods=1)
         print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2, default=str))
     finally:
         service.close()

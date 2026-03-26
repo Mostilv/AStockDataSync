@@ -1,5 +1,4 @@
 akshare
-baostock
 pandas
 pymongo
 pytz

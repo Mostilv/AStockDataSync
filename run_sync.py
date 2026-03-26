@@ -23,14 +23,14 @@ def main() -> None:
         "--frequency",
         dest="frequencies",
         action="append",
-        choices=["d", "w", "m", "5"],
+        choices=["d", "w", "m", "1", "5", "15", "30", "60"],
         default=None,
         help="Frequency to sync. Repeatable.",
     )
     parser.add_argument(
         "--daily-days",
         type=int,
-        default=180,
+        default=None,
         help="Lookback window for daily data",
     )
     parser.add_argument(
@@ -51,7 +51,7 @@ def main() -> None:
         result = service.maintain_database(
             frequencies=frequencies,
             symbols=args.symbols,
-            daily_days=args.daily_days,
+            daily_days=args.daily_days or int(astock_cfg.get("daily_lookback_days", 365)),
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     finally:

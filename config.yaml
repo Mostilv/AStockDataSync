@@ -4,11 +4,23 @@ mongodb:
   collections:
     stock_basic: "stock_basic"
     stock_kline: "stock_kline"
+    stock_fundamental: "stock_fundamental"
     sync_meta: "sync_meta"
 
 astock:
-  frequencies: ["d", "w", "m"]
+  frequencies: ["d", "1"]
   batch_size: 500
   pause_seconds: 0.2
-  daily_lookback_days: 180
+  symbol_batch_size: 30
+  batch_pause_seconds: 2.0
+  request_workers: 2
+  daily_lookback_days: 365
+  minute_lookback_days: 5
+  daily_retention_days: 365
+  minute_retention_days: 30
+  daily_overlap_days: 5
+  minute_overlap_minutes: 30
+  fundamental_report_periods: 8
+  fundamental_maintain_periods: 1
+  fundamental_refresh_hours: 24
   maintain_interval_minutes: 60
