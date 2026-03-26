@@ -1,14 +1,11 @@
-# 数据采集与处理
 akshare
 baostock
 pandas
 pymongo
 pytz
-TA-Lib
 PyYAML
-
-# 辅助工具
-tqdm
 requests
+TA-Lib
+tqdm
 mplfinance
 mplcursors

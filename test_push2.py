@@ -1,27 +1,10 @@
-import logging
-import sys
-import traceback
-from src.data.manager_backend import StockMiddlePlatformBackendSync
-import json
+from src.data.cleaners import normalize_symbol, raw_symbol
 
-logging.getLogger('pymongo').setLevel(logging.WARNING)
-logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-try:
-    sync = StockMiddlePlatformBackendSync()
-    sync._ensure_authenticated()
-    doc = {'code': '000001', 'code_name': 'Test Stock', 'source': 'akshare', 'temporary': False}
-    payload = {
-        'target': sync.basic_target, 
-        'provider': sync.provider, 
-        sync.basic_payload_key: [sync._transform_basic_doc(doc)], 
-        **sync.extra_basic_payload
-    }
-    url = sync._build_url(sync.basic_path)
-    print(f'POSTing to {url}')
-    resp = sync.session.post(url, json=payload, timeout=5)
-    print(f'Status: {resp.status_code}')
-    print(f'Response: {resp.text}')
-except Exception as e:
-    print('Error:', e)
-    traceback.print_exc()
+def main() -> None:
+    for value in ["600519", "000001", "BJ430047"]:
+        print(value, "->", normalize_symbol(value), "->", raw_symbol(value))
+
+
+if __name__ == "__main__":
+    main()
