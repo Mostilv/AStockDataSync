@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from pymongo import ASCENDING, MongoClient, UpdateOne
+from pymongo.errors import OperationFailure
 from pymongo.collection import Collection
 from pymongo.database import Database
 
@@ -44,21 +45,25 @@ class MongoStorage:
         return self.database[self.collections.sync_meta]
 
     def ensure_indexes(self) -> None:
-        self.stock_basic_collection.create_index(
+        self._safe_create_index(
+            self.stock_basic_collection,
             [("symbol", ASCENDING)],
             unique=True,
             name="symbol_unique",
         )
-        self.stock_kline_collection.create_index(
+        self._safe_create_index(
+            self.stock_kline_collection,
             [("symbol", ASCENDING), ("frequency", ASCENDING), ("timestamp", ASCENDING)],
             unique=True,
             name="symbol_frequency_timestamp_unique",
         )
-        self.stock_kline_collection.create_index(
+        self._safe_create_index(
+            self.stock_kline_collection,
             [("symbol", ASCENDING), ("frequency", ASCENDING), ("trade_date", ASCENDING)],
             name="symbol_frequency_trade_date_idx",
         )
-        self.sync_meta_collection.create_index(
+        self._safe_create_index(
+            self.sync_meta_collection,
             [("task", ASCENDING), ("scope", ASCENDING)],
             unique=True,
             name="task_scope_unique",
@@ -141,3 +146,12 @@ class MongoStorage:
             "modified": int(getattr(result, "modified_count", 0)),
             "upserted": len(getattr(result, "upserted_ids", {}) or {}),
         }
+
+    @staticmethod
+    def _safe_create_index(collection: Collection, keys, **kwargs) -> None:
+        try:
+            collection.create_index(keys, **kwargs)
+        except OperationFailure as exc:
+            if exc.code == 85 or "already exists with a different name" in str(exc):
+                return
+            raise

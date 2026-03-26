@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -112,7 +112,7 @@ def clean_kline(
                 "symbol": normalized_symbol,
                 "frequency": normalized_frequency,
                 "timestamp": timestamp,
-                "trade_date": timestamp.date(),
+                "trade_date": datetime.combine(timestamp.date(), time.min),
                 "open": open_price,
                 "high": high_price,
                 "low": low_price,
@@ -200,8 +200,10 @@ def _clean_optional_text(value: Any) -> Optional[str]:
 
 
 def _clean_scalar(value: Any) -> Any:
-    if isinstance(value, (datetime,)):
+    if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, date):
+        return datetime.combine(value, time.min).isoformat()
     try:
         if pd.isna(value):
             return None

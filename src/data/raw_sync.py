@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 import akshare as ak
+import baostock as bs
+import pandas as pd
 
 from .cleaners import clean_kline, clean_stock_basic, chunked, raw_symbol
 from .mongo_storage import MongoCollections, MongoStorage
@@ -30,6 +33,7 @@ class SyncSummary:
 class RawDataSyncService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
+        self._disable_proxy()
         mongo_cfg = config.get("mongodb", {}) or {}
         collection_cfg = (mongo_cfg.get("collections", {}) or {})
         self.storage = MongoStorage(
@@ -152,13 +156,19 @@ class RawDataSyncService:
 
         if frequency in {"d", "w", "m"}:
             period_map = {"d": "daily", "w": "weekly", "m": "monthly"}
-            df = ak.stock_zh_a_hist(
-                symbol=raw_code,
-                period=period_map[frequency],
-                start_date=start_date,
-                end_date=end_date,
-                adjust="qfq",
-            )
+            try:
+                df = ak.stock_zh_a_hist(
+                    symbol=raw_code,
+                    period=period_map[frequency],
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust="qfq",
+                )
+            except Exception:
+                if frequency == "d":
+                    df = self._fetch_daily_from_baostock(symbol, start_date, end_date)
+                else:
+                    raise
             return clean_kline(symbol, frequency, df)
 
         if frequency == "5":
@@ -183,3 +193,64 @@ class RawDataSyncService:
         if frequency == "m":
             return max(365 * 3, daily_days)
         return daily_days
+
+    @staticmethod
+    def _disable_proxy() -> None:
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            os.environ[key] = ""
+
+    @staticmethod
+    def _fetch_daily_from_baostock(
+        symbol: str,
+        start_date: Optional[str],
+        end_date: str,
+    ) -> pd.DataFrame:
+        login_result = bs.login()
+        if login_result.error_code != "0":
+            raise RuntimeError(f"baostock login failed: {login_result.error_msg}")
+        try:
+            bs_symbol = RawDataSyncService._to_baostock_symbol(symbol)
+            query = bs.query_history_k_data_plus(
+                bs_symbol,
+                "date,open,high,low,close,volume,amount,pctChg",
+                start_date=RawDataSyncService._format_baostock_date(start_date),
+                end_date=datetime.strptime(end_date, "%Y%m%d").strftime("%Y-%m-%d"),
+                frequency="d",
+                adjustflag="2",
+            )
+            rows: List[Dict[str, Any]] = []
+            while query.error_code == "0" and query.next():
+                row = dict(zip(query.fields, query.get_row_data()))
+                rows.append(
+                    {
+                        "日期": row.get("date"),
+                        "开盘": row.get("open"),
+                        "最高": row.get("high"),
+                        "最低": row.get("low"),
+                        "收盘": row.get("close"),
+                        "成交量": row.get("volume"),
+                        "成交额": row.get("amount"),
+                        "涨跌幅": row.get("pctChg"),
+                    }
+                )
+            return pd.DataFrame(rows)
+        finally:
+            bs.logout()
+
+    @staticmethod
+    def _to_baostock_symbol(symbol: str) -> str:
+        if symbol.startswith("SH"):
+            return f"sh.{symbol[2:]}"
+        if symbol.startswith("SZ"):
+            return f"sz.{symbol[2:]}"
+        if symbol.startswith("BJ"):
+            return f"bj.{symbol[2:]}"
+        raise ValueError(f"Unsupported symbol for baostock fallback: {symbol}")
+
+    @staticmethod
+    def _format_baostock_date(value: Optional[str]) -> str:
+        if not value:
+            return "1990-01-01"
+        if len(value) == 8 and value.isdigit():
+            return datetime.strptime(value, "%Y%m%d").strftime("%Y-%m-%d")
+        return value
