@@ -33,7 +33,7 @@ def main() -> None:
     astock_cfg = config.get("astock", {}) or {}
     interval_minutes = args.interval_minutes or int(astock_cfg.get("maintain_interval_minutes", 60))
     frequencies = astock_cfg.get("frequencies") or ["d"]
-    daily_days = int(astock_cfg.get("daily_lookback_days", 180))
+    daily_days = int(astock_cfg.get("daily_lookback_days", 365))
 
     while True:
         started_at = datetime.utcnow()

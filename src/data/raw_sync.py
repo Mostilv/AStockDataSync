@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 import akshare as ak
+from tqdm.auto import tqdm
 
 from .cleaners import (
     clean_fundamental_snapshot,
@@ -52,6 +54,7 @@ class RawDataSyncService:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self._disable_proxy()
+        self._disable_akshare_progress()
 
         mongo_cfg = config.get("mongodb", {}) or {}
         collection_cfg = mongo_cfg.get("collections", {}) or {}
@@ -103,7 +106,12 @@ class RawDataSyncService:
         basic_df = ak.stock_info_a_code_name()
         records = clean_stock_basic(basic_df)
         summary.total = len(records)
-        for batch in chunked(records, self.batch_size):
+        for batch in tqdm(
+            list(chunked(records, self.batch_size)),
+            desc="[stock_basic] write",
+            unit="batch",
+            dynamic_ncols=True,
+        ):
             summary.merge(self.storage.upsert_stock_basic(batch))
         self.storage.update_sync_meta(
             "stock_basic",
@@ -126,7 +134,12 @@ class RawDataSyncService:
             periods or self.fundamental_report_periods
         ))
         summary = SyncSummary()
-        for report_date in target_report_dates:
+        for report_date in tqdm(
+            target_report_dates,
+            desc="[stock_fundamental] reports",
+            unit="report",
+            dynamic_ncols=True,
+        ):
             if self._should_skip_fundamental_report(report_date):
                 logger.info("Skip stock fundamentals for report_date=%s", report_date)
                 continue
@@ -169,6 +182,11 @@ class RawDataSyncService:
             sync_symbols = sync_symbols[:limit]
         if not sync_symbols:
             raise ValueError("No symbols available. Run stock basic sync first.")
+        if normalized_frequency in MINUTE_FREQUENCIES:
+            self._ensure_minute_source_available(
+                symbol=sync_symbols[0],
+                frequency=normalized_frequency,
+            )
 
         lookback_days = days or self._resolve_days(normalized_frequency)
         latest_map = self.storage.get_latest_kline_timestamps(
@@ -186,21 +204,30 @@ class RawDataSyncService:
         ]
 
         summary = SyncSummary()
-        for batch_index, plan_batch in enumerate(
-            chunked(plans, self.symbol_batch_size),
-            start=1,
-        ):
-            logger.info(
-                "Syncing batch %s for frequency=%s, size=%s",
-                batch_index,
-                normalized_frequency,
-                len(plan_batch),
-            )
-            batch_summary = self._sync_plan_batch(plan_batch)
-            summary.total += batch_summary.total
-            summary.merge(batch_summary.__dict__)
-            if self.batch_pause_seconds > 0:
-                time.sleep(self.batch_pause_seconds)
+        progress = tqdm(
+            total=len(plans),
+            desc=f"[stock_kline:{normalized_frequency}] symbols",
+            unit="symbol",
+            dynamic_ncols=True,
+        )
+        try:
+            for batch_index, plan_batch in enumerate(
+                chunked(plans, self.symbol_batch_size),
+                start=1,
+            ):
+                logger.info(
+                    "Syncing batch %s for frequency=%s, size=%s",
+                    batch_index,
+                    normalized_frequency,
+                    len(plan_batch),
+                )
+                batch_summary = self._sync_plan_batch(plan_batch, progress=progress)
+                summary.total += batch_summary.total
+                summary.merge(batch_summary.__dict__)
+                if self.batch_pause_seconds > 0:
+                    time.sleep(self.batch_pause_seconds)
+        finally:
+            progress.close()
 
         logger.info("K-line sync finished: %s", summary.__dict__)
         return summary
@@ -213,23 +240,35 @@ class RawDataSyncService:
         daily_days: int = 180,
     ) -> Dict[str, Dict[str, int]]:
         results: Dict[str, Dict[str, int]] = {}
-        results["stock_basic"] = self.sync_stock_basic().__dict__.copy()
-        results["stock_fundamental"] = self.sync_fundamentals(
-            periods=self.fundamental_maintain_periods
-        ).__dict__.copy()
-        for frequency in frequencies:
-            summary = self.sync_kline(
-                symbols=symbols,
-                frequency=frequency,
-                days=self._resolve_days(frequency, daily_days=daily_days),
-            )
-            results[f"stock_kline:{frequency}"] = summary.__dict__.copy()
-            pruned = self._prune_old_kline(frequency)
-            if pruned:
-                results[f"stock_kline:{frequency}"]["pruned"] = pruned
+        module_progress = tqdm(
+            total=2 + len(frequencies),
+            desc="[maintain] modules",
+            unit="module",
+            dynamic_ncols=True,
+        )
+        try:
+            results["stock_basic"] = self.sync_stock_basic().__dict__.copy()
+            module_progress.update(1)
+            results["stock_fundamental"] = self.sync_fundamentals(
+                periods=self.fundamental_maintain_periods
+            ).__dict__.copy()
+            module_progress.update(1)
+            for frequency in frequencies:
+                summary = self.sync_kline(
+                    symbols=symbols,
+                    frequency=frequency,
+                    days=self._resolve_days(frequency, daily_days=daily_days),
+                )
+                results[f"stock_kline:{frequency}"] = summary.__dict__.copy()
+                pruned = self._prune_old_kline(frequency)
+                if pruned:
+                    results[f"stock_kline:{frequency}"]["pruned"] = pruned
+                module_progress.update(1)
+        finally:
+            module_progress.close()
         return results
 
-    def _sync_plan_batch(self, plans: List[FetchPlan]) -> SyncSummary:
+    def _sync_plan_batch(self, plans: List[FetchPlan], *, progress) -> SyncSummary:
         summary = SyncSummary()
         with ThreadPoolExecutor(max_workers=self.request_workers) as executor:
             future_map = {
@@ -247,9 +286,11 @@ class RawDataSyncService:
                         plan.frequency,
                         exc,
                     )
+                    progress.update(1)
                     continue
 
                 if not records:
+                    progress.update(1)
                     continue
 
                 summary.total += len(records)
@@ -270,6 +311,7 @@ class RawDataSyncService:
                 )
                 if self.pause_seconds > 0:
                     time.sleep(self.pause_seconds)
+                progress.update(1)
         return summary
 
     def _build_fetch_plan(
@@ -296,6 +338,20 @@ class RawDataSyncService:
             latest_timestamp=latest_timestamp,
         )
 
+    def _ensure_minute_source_available(self, *, symbol: str, frequency: str) -> None:
+        probe_plan = self._build_fetch_plan(
+            symbol=symbol,
+            frequency=frequency,
+            latest_timestamp=None,
+            lookback_days=1,
+        )
+        try:
+            self._fetch_minute_records(probe_plan)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Minute data source unavailable for frequency={frequency}: {exc}"
+            ) from exc
+
     def _fetch_plan_records(self, plan: FetchPlan) -> List[Dict[str, Any]]:
         if self._should_skip_plan(plan):
             logger.info(
@@ -308,10 +364,10 @@ class RawDataSyncService:
             records = self._fetch_daily_records(plan)
         elif plan.frequency in {"w", "m"}:
             records = self._fetch_bar_records(plan)
-        elif plan.frequency == "1":
-            records = self._fetch_one_minute_records(plan)
-        else:
+        elif plan.frequency in MINUTE_FREQUENCIES:
             records = self._fetch_minute_records(plan)
+        else:
+            raise ValueError(f"Unsupported frequency: {plan.frequency}")
 
         if plan.latest_timestamp is None:
             return records
@@ -340,16 +396,6 @@ class RawDataSyncService:
         )
         return clean_kline(plan.symbol, plan.frequency, df)
 
-    def _fetch_one_minute_records(self, plan: FetchPlan) -> List[Dict[str, Any]]:
-        df = ak.stock_zh_a_minute(
-            symbol=market_prefixed_symbol(plan.symbol),
-            period="1",
-            adjust="",
-        )
-        if not df.empty:
-            df = df[df["day"] >= plan.start_at.strftime("%Y-%m-%d %H:%M:%S")]
-        return clean_kline(plan.symbol, plan.frequency, df)
-
     def _fetch_minute_records(self, plan: FetchPlan) -> List[Dict[str, Any]]:
         df = ak.stock_zh_a_hist_min_em(
             symbol=raw_symbol(plan.symbol),
@@ -358,8 +404,14 @@ class RawDataSyncService:
             period=plan.frequency,
             adjust="",
         )
-        if not df.empty and "时间" in df.columns:
-            df = df[df["时间"] >= plan.start_at.strftime("%Y-%m-%d %H:%M:%S")]
+        if not df.empty:
+            time_column = None
+            if "时间" in df.columns:
+                time_column = "时间"
+            elif "鏃堕棿" in df.columns:
+                time_column = "鏃堕棿"
+            if time_column:
+                df = df[df[time_column] >= plan.start_at.strftime("%Y-%m-%d %H:%M:%S")]
         return clean_kline(plan.symbol, plan.frequency, df)
 
     def _recent_report_dates(self, periods: int) -> List[str]:
@@ -445,3 +497,14 @@ class RawDataSyncService:
             os.environ.pop(key, None)
         os.environ["NO_PROXY"] = "*"
         os.environ["no_proxy"] = "*"
+
+    @staticmethod
+    def _disable_akshare_progress() -> None:
+        silent_tqdm = lambda enable=True: (  # noqa: E731
+            lambda iterable, *args, **kwargs: iterable
+        )
+        for name, module in list(sys.modules.items()):
+            if not name.startswith("akshare"):
+                continue
+            if hasattr(module, "get_tqdm"):
+                setattr(module, "get_tqdm", silent_tqdm)

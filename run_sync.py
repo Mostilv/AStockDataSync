@@ -43,15 +43,17 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_runtime_config(args.config)
+    astock_cfg = config.get("astock", {}) or {}
+    frequencies = args.frequencies or astock_cfg.get("frequencies") or ["d"]
+    daily_days = args.daily_days or int(astock_cfg.get("daily_lookback_days", 365))
+
     service = RawDataSyncService(config)
     service.initialize()
     try:
-        astock_cfg = config.get("astock", {}) or {}
-        frequencies = args.frequencies or astock_cfg.get("frequencies") or ["d"]
         result = service.maintain_database(
             frequencies=frequencies,
             symbols=args.symbols,
-            daily_days=args.daily_days or int(astock_cfg.get("daily_lookback_days", 365)),
+            daily_days=daily_days,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     finally:

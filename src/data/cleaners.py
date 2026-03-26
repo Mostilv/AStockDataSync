@@ -56,6 +56,7 @@ FUNDAMENTAL_COLUMN_ALIASES = {
 }
 
 
+
 def normalize_symbol(raw_symbol: str) -> str:
     text = str(raw_symbol or "").strip()
     if not text:
@@ -158,6 +159,8 @@ def clean_fundamental_snapshot(
             }
         )
     return records
+
+
 
 
 def clean_kline(symbol: str, frequency: str, df: pd.DataFrame) -> List[Dict[str, Any]]:

@@ -149,6 +149,7 @@ class MongoStorage:
             )
         return self._bulk_write(self.stock_fundamental_collection, operations)
 
+
     def update_sync_meta(self, task: str, scope: str, payload: Dict[str, Any]) -> None:
         self.sync_meta_collection.update_one(
             {"task": task, "scope": scope},
