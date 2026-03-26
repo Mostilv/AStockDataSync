@@ -164,7 +164,7 @@ class IndicatorEngine:
         backfill_days: int = 0,
         since: Optional[datetime] = None,
     ) -> Optional[pd.DataFrame]:
-        collection = self.kline_collections.get(job.frequency)
+        collection = self.collections.get(job.frequency)
         if collection is None:
             print(f"No k-line collection found for frequency {job.frequency}; skip {job.name}.")
             return None

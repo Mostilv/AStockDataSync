@@ -88,6 +88,7 @@ def run_indicator_suite(
         )
         return
 
+    mongo_cfg = config.get("mongodb", {}) or {}
     client = MongoClient(mongo_cfg.get("uri", "mongodb://localhost:27017/"))
     db = client.get_database(akshare_cfg.get("db", "akshare_data"))
     indicator_col = db[indicator_collection_name]

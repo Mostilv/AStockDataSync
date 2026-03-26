@@ -277,6 +277,41 @@ class BackendClient:
         except Exception as e:
             logger.error(f"Failed to push indicators: {e}")
 
+    def push_market_indices(self, indices_data: Dict[str, Any]) -> None:
+        if not self.enabled or not indices_data:
+            return
+        try:
+            self._ensure_auth()
+            url = f"{self.base_url}{self.api_prefix}/data/market/indices"
+            payload = {
+                "target": self.target,
+                "data": indices_data
+            }
+            resp = self.session.post(url, json=payload, headers=self.get_headers(), timeout=30)
+            resp.raise_for_status()
+            logger.info("Pushed market indices successfully.")
+        except Exception as e:
+            logger.error(f"Failed to push market indices: {e}")
+
+    def push_limit_up_pool(self, date_str: str, pool_data: List[Dict[str, Any]]) -> None:
+        if not self.enabled or not pool_data:
+            return
+        try:
+            self._ensure_auth()
+            url = f"{self.base_url}{self.api_prefix}/data/limit_up/pool"
+            payload = {
+                "target": self.target,
+                "date": date_str,
+                "data": pool_data
+            }
+            # Batching usually not needed as limit up is < 200 stocks
+            resp = self.session.post(url, json=payload, headers=self.get_headers(), timeout=30)
+            resp.raise_for_status()
+            logger.info(f"Pushed {len(pool_data)} limit up records for {date_str}.")
+        except Exception as e:
+            msg = e.response.text if hasattr(e, "response") and e.response is not None else str(e)
+            logger.error(f"Failed to push limit up pool: {msg}")
+
     def check_integrity(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Check data integrity against backend.
